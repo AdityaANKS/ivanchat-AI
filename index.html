@@ -12,7 +12,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       // Robust shim for process.env to prevent SDK crashes and blank page errors
-      window.process = window.process || {};
+      window.process = window.process || { env: {} };
       window.process.env = window.process.env || {};
       
       tailwind.config = {
@@ -63,7 +63,7 @@
 </head>
 <body>
     <div id="root"></div>
-    <!-- Absolute root path to ensure script loads on custom domains -->
-    <script type="module" src="/index.tsx"></script>
+    <!-- Using relative path to current directory to fix loading issues on custom domains -->
+    <script type="module" src="./index.tsx"></script>
 </body>
 </html>

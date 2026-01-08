@@ -337,7 +337,7 @@ const App: React.FC = () => {
       setGenProgress(0);
       initAudioContext();
       
-      const maxChunkChars = 1200; // Slightly smaller chunks to ensure stability
+      const maxChunkChars = 1200;
       const textChunks: { text: string; start: number; end: number }[] = [];
       let currentChunkText = "";
       let currentStart = 0;
@@ -355,13 +355,11 @@ const App: React.FC = () => {
       }
       if (currentChunkText) textChunks.push({ text: currentChunkText, start: currentStart, end: currentStart + currentChunkText.length });
       
-      // CRITICAL FIX: Sequential synthesis with forced await and micro-delay to prevent undici/SDK memory leaks
       const results: { buffer: AudioBuffer; chunk: typeof textChunks[0]; sceneMeta: SceneMetadata }[] = [];
       for (let i = 0; i < textChunks.length; i++) {
         const chunk = textChunks[i];
-        // 1. Analyze scene
         const sceneMeta = await geminiService.analyzeScene(chunk.text);
-        // 2. Synthesize audio
+        // Using the definitive geminiService in services/geminiService.ts
         const base64 = await geminiService.textToSpeech(chunk.text, selectedTones, gender, pitch, includeBreaths, sceneMeta);
         const bytes = decodeBase64(base64);
         const buffer = await decodeAudioData(bytes, audioContextRef.current!, 24000, 1);
@@ -369,8 +367,8 @@ const App: React.FC = () => {
         results.push({ buffer, chunk, sceneMeta });
         setGenProgress(((i + 1) / textChunks.length) * 100);
         
-        // Short pause to ensure the GC/Network stack clears previous listeners
-        await new Promise(resolve => setTimeout(resolve, 100));
+        // Brief delay to let the environment settle between API requests
+        await new Promise(resolve => setTimeout(resolve, 150));
       }
       
       const totalSamples = results.reduce((acc, r) => acc + r.buffer.length, 0);
@@ -408,7 +406,7 @@ const App: React.FC = () => {
       setTimeout(() => setIsGeneratingAudio(false), 800);
     } catch (e) {
       console.error(e);
-      alert("Synthesis engine error. Breaking the manuscript into smaller chapters often helps stability.");
+      alert("An error occurred during synthesis. Please ensure your manuscript is formatted correctly and try again.");
       setIsGeneratingAudio(false);
     }
   };
@@ -760,7 +758,7 @@ const App: React.FC = () => {
       {/* MAIN PANEL */}
       <main className="flex-1 flex flex-col relative min-w-0 transition-colors duration-500">
         <div 
-          className="flex-1 overflow-y-auto p-4 sm:p-8 lg:p-12 scrollbar-hide transition-[padding]" 
+          className="flex-1 overflow-y-auto p-4 sm:p-8 lg:p-12 scrollbar-hide" 
           ref={scrollContainerRef}
         >
           <div className="max-w-4xl mx-auto space-y-8">
