@@ -11,6 +11,8 @@
     <script>
       // Shim process.env for the browser environment
       window.process = window.process || { env: {} };
+      if (!window.process.env) window.process.env = {};
+      
       tailwind.config = {
         darkMode: 'class',
       }
@@ -68,6 +70,6 @@
 </head>
 <body>
     <div id="root"></div>
-    <script type="module" src="./index.tsx"></script>
+    <script type="module" src="/index.tsx"></script>
 </body>
 </html>
