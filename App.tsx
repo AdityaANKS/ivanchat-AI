@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { ReadingTone, VoiceGender, ChatMessage, CharacterBio, VoicePreset, ChatSession, SceneMetadata, Chapter } from './types';
-import { geminiService } from './services/geminiService';
-import { decodeBase64, decodeAudioData, floatTo16BitPCM, encodeBase64, audioBufferToWav } from './services/audioService';
+import { ReadingTone, VoiceGender, ChatMessage, CharacterBio, VoicePreset, ChatSession, SceneMetadata, Chapter } from './types.ts';
+import { geminiService } from './services/geminiService.ts';
+import { decodeBase64, decodeAudioData, floatTo16BitPCM, encodeBase64, audioBufferToWav } from './services/audioService.ts';
 import { GoogleGenAI } from "@google/genai";
 import { 
   PlayIcon, 
@@ -99,7 +99,6 @@ const App: React.FC = () => {
   }, [appIcon]);
 
   const generateBranding = useCallback(async () => {
-    // Only generate if we don't have one or if explicitly triggered (though we removed the click handler for "fixed" behavior)
     if (appIcon) return;
     
     setIsGeneratingBranding(true);

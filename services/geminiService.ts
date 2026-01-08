@@ -1,6 +1,5 @@
-
 import { GoogleGenAI, Modality, Type } from "@google/genai";
-import { ReadingTone, VoiceGender, CharacterBio, SceneMetadata } from "../types";
+import { ReadingTone, VoiceGender, CharacterBio, SceneMetadata } from "../types.ts";
 
 // Always use process.env.API_KEY directly as per guidelines
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
