@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { ReadingTone, VoiceGender, ChatMessage, CharacterBio, VoicePreset, ChatSession, SceneMetadata, Chapter } from './types.ts';
 import { geminiService } from './services/geminiService.ts';
-import { decodeBase64, decodeAudioData, floatTo16BitPCM, encodeBase64, audioBufferToWav } from './services/audioService.ts';
+import { decodeBase64, decodeAudioData, floatTo16BitPCM, encodeBase64, audioBufferToWav, saveAudioToDB, getAudioFromDB } from './services/audioService.ts';
 import { GoogleGenAI } from "@google/genai";
 import { 
   PlayIcon, 
@@ -196,13 +196,6 @@ const App: React.FC = () => {
   const [duration, setDuration] = useState(0);
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
   const [genProgress, setGenProgress] = useState(0);
-  
-  // --- Sponsored Visibility ---
-  const [showSponsored, setShowSponsored] = useState<boolean>(() => {
-    return sessionStorage.getItem('ivanchat_dismissed_sponsored') !== 'true';
-  });
-
-  const [showChat, setShowChat] = useState(true);
   const [audioChunks, setAudioChunks] = useState<AudioChunkMetadata[]>([]);
 
   // --- Refs ---
@@ -215,7 +208,7 @@ const App: React.FC = () => {
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
-  // --- Persistence ---
+  // --- Persistence & Audio Loading ---
   useEffect(() => {
     localStorage.setItem('ivanchat_novel_text', novelText);
     localStorage.setItem('ivanchat_characters', JSON.stringify(characters));
@@ -225,6 +218,41 @@ const App: React.FC = () => {
     if (isDarkMode) document.documentElement.classList.add('dark');
     else document.documentElement.classList.remove('dark');
   }, [novelText, characters, presets, chatSessions, isDarkMode]);
+
+  // Load existing audio on mount or chapter change
+  useEffect(() => {
+    const loadCachedAudio = async () => {
+      const cachedBlob = await getAudioFromDB(`audio_${selectedChapterId}`);
+      const cachedMetadata = localStorage.getItem(`ivanchat_meta_${selectedChapterId}`);
+      
+      if (cachedBlob && cachedMetadata) {
+        initAudioContext();
+        const arrayBuffer = await cachedBlob.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
+        // We use standard decodeAudioData for complete WAV files
+        const buffer = await audioContextRef.current!.decodeAudioData(arrayBuffer);
+        
+        currentAudioBufferRef.current = buffer;
+        setAudioChunks(JSON.parse(cachedMetadata));
+        setDuration(buffer.duration);
+        setCurrentTime(0);
+        pausedTimeRef.current = 0;
+      } else {
+        // Clear if not found
+        currentAudioBufferRef.current = null;
+        setAudioChunks([]);
+        setDuration(0);
+      }
+    };
+    loadCachedAudio();
+  }, [selectedChapterId]);
+
+  // --- Sponsored Visibility ---
+  const [showSponsored, setShowSponsored] = useState<boolean>(() => {
+    return sessionStorage.getItem('ivanchat_dismissed_sponsored') !== 'true';
+  });
+
+  const [showChat, setShowChat] = useState(true);
 
   // --- Text Processing ---
   const processedData = useMemo(() => {
@@ -392,6 +420,12 @@ const App: React.FC = () => {
       pausedTimeRef.current = 0;
       setGenProgress(100);
       setViewMode('reader');
+      
+      // PERSIST AUDIO TO DB
+      const wavBlob = audioBufferToWav(mergedBuffer);
+      await saveAudioToDB(`audio_${selectedChapterId}`, wavBlob);
+      localStorage.setItem(`ivanchat_meta_${selectedChapterId}`, JSON.stringify(metadata));
+
       playBuffer(mergedBuffer, 0);
       setIsAudioPlaying(true);
       setTimeout(() => setIsGeneratingAudio(false), 800);
@@ -466,6 +500,7 @@ const App: React.FC = () => {
       lastUpdated: new Date() 
     };
     setChatSessions(prev => [newSession, ...prev]);
+    alert("Chat session archived.");
   };
 
   const handleLoadChat = (s: ChatSession) => {
@@ -577,6 +612,27 @@ const App: React.FC = () => {
               >
                 <BookOpenIcon className="w-4 h-4" /> Reader
               </button>
+            </div>
+          </section>
+
+          {/* CHAT HISTORY */}
+          <section>
+            <div className="flex items-center gap-2 mb-4 text-slate-400 font-bold uppercase text-[10px] tracking-widest">
+              <ArchiveBoxIcon className="w-4 h-4" /> Chat History
+            </div>
+            <div className="space-y-1 max-h-32 overflow-y-auto scrollbar-hide">
+              {chatSessions.length === 0 ? (
+                <div className="text-[10px] text-center p-4 border border-dashed rounded-lg opacity-40 italic">No saved sessions</div>
+              ) : (
+                chatSessions.map((s) => (
+                  <div key={s.id} className="group flex items-center justify-between bg-slate-50 dark:bg-slate-800 p-2 rounded-xl border dark:border-slate-800 hover:border-indigo-400 transition-all">
+                    <button onClick={() => handleLoadChat(s)} className="flex-1 text-left text-[11px] font-medium truncate px-2">{s.name}</button>
+                    <button onClick={(e) => handleDeleteChat(s.id, e)} className="p-1 text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <TrashIcon className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
           </section>
 
@@ -908,21 +964,6 @@ const App: React.FC = () => {
           <button onClick={() => setShowChat(true)} className="absolute bottom-12 right-12 w-16 h-16 bg-indigo-600 text-white rounded-[2rem] flex items-center justify-center shadow-2xl hover:scale-110 active:scale-95 transition-all z-50">
             <ChatBubbleLeftRightIcon className="w-8 h-8" />
           </button>
-        )}
-
-        {/* SPONSORED BANNER */}
-        {showSponsored && (
-          <div className="fixed bottom-4 left-1/2 -translate-x-1/2 w-full max-w-md px-4 z-[60]">
-            <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden relative">
-              <div className="flex items-center justify-between px-4 py-2 bg-slate-50 dark:bg-slate-800/50">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Sponsored Support</span>
-                <button onClick={() => { setShowSponsored(false); sessionStorage.setItem('ivanchat_dismissed_sponsored', 'true'); }} className="p-1 hover:text-red-500 transition-colors"><XMarkIcon className="w-4 h-4" /></button>
-              </div>
-              <div className="p-4 h-32">
-                <GoogleAdSenseUnit slot="BANNER_01" format="horizontal" />
-              </div>
-            </div>
-          </div>
         )}
       </main>
     </div>

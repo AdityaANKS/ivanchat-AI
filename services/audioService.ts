@@ -1,3 +1,4 @@
+
 export function decodeBase64(base64: string): Uint8Array {
   try {
     if (!base64 || typeof base64 !== 'string') return new Uint8Array(0);
@@ -107,4 +108,45 @@ export function audioBufferToWav(buffer: AudioBuffer): Blob {
   }
 
   return new Blob([arrayBuffer], { type: 'audio/wav' });
+}
+
+// --- IndexedDB Persistence ---
+
+const DB_NAME = 'IvanchatDB';
+const STORE_NAME = 'audioCache';
+
+export async function saveAudioToDB(id: string, blob: Blob): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(STORE_NAME);
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      store.put(blob, id);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function getAudioFromDB(id: string): Promise<Blob | null> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(STORE_NAME);
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const getReq = store.get(id);
+      getReq.onsuccess = () => resolve(getReq.result || null);
+      getReq.onerror = () => reject(getReq.error);
+    };
+    request.onerror = () => reject(request.error);
+  });
 }
