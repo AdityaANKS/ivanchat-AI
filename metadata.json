@@ -1,0 +1,7 @@
+{
+  "name": "Ivanchat: AI Literary Companion",
+  "description": "An advanced manuscript reader and emotionally-resonant narrator that utilizes sophisticated AI models for long-form text analysis and multi-tone vocal synthesis.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
