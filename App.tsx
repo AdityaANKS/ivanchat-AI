@@ -39,28 +39,6 @@ interface AudioChunkMetadata {
   scene?: SceneMetadata;
 }
 
-const GoogleAdSenseUnit: React.FC<{ slot: string; format?: string; className?: string }> = ({ slot, format = 'auto', className = '' }) => {
-  useEffect(() => {
-    try {
-      // @ts-ignore
-      (window.adsbygoogle = window.adsbygoogle || []).push({});
-    } catch (e) {
-      console.debug('AdSense pending initialization');
-    }
-  }, []);
-
-  return (
-    <div className={`overflow-hidden rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 ${className}`}>
-      <ins className="adsbygoogle"
-           style={{ display: 'block' }}
-           data-ad-client="ca-pub-5322028632012246"
-           data-ad-slot={slot}
-           data-ad-format={format}
-           data-full-width-responsive="true"></ins>
-    </div>
-  );
-};
-
 const App: React.FC = () => {
   // --- Core States ---
   const [novelText, setNovelText] = useState<string>(() => localStorage.getItem('ivanchat_novel_text') || '');
@@ -104,7 +82,7 @@ const App: React.FC = () => {
     setIsGeneratingBranding(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const prompt = "Generate a modern, minimal favicon for a web application named 'Ivanchat'. The favicon should be simple, clean, and highly recognizable at very small sizes, using a bold symbol rather than detailed text. Design it to represent intelligent conversation and AI-powered interaction, with a sleek, futuristic feel. Use a limited color palette with strong indigo and white contrast, smooth geometric shapes, and a flat design style. The icon should be a single centered logo mark.";
+      const prompt = "Generate a modern, minimal favicon for a web application named 'Ivanchat'. The favicon should be simple, clean, and highly recognizable at very small sizes, using a bold symbol rather than detailed text.";
       
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash-image',
@@ -219,18 +197,17 @@ const App: React.FC = () => {
     else document.documentElement.classList.remove('dark');
   }, [novelText, characters, presets, chatSessions, isDarkMode]);
 
-  // Load existing audio on mount or chapter change
   useEffect(() => {
     const loadCachedAudio = async () => {
       const cachedBlob = await getAudioFromDB(`audio_${selectedChapterId}`);
       const cachedMetadata = localStorage.getItem(`ivanchat_meta_${selectedChapterId}`);
       
       if (cachedBlob && cachedMetadata) {
-        initAudioContext();
+        if (!audioContextRef.current) {
+          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        }
         const arrayBuffer = await cachedBlob.arrayBuffer();
-        const uint8 = new Uint8Array(arrayBuffer);
-        // We use standard decodeAudioData for complete WAV files
-        const buffer = await audioContextRef.current!.decodeAudioData(arrayBuffer);
+        const buffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
         
         currentAudioBufferRef.current = buffer;
         setAudioChunks(JSON.parse(cachedMetadata));
@@ -238,7 +215,6 @@ const App: React.FC = () => {
         setCurrentTime(0);
         pausedTimeRef.current = 0;
       } else {
-        // Clear if not found
         currentAudioBufferRef.current = null;
         setAudioChunks([]);
         setDuration(0);
@@ -246,11 +222,6 @@ const App: React.FC = () => {
     };
     loadCachedAudio();
   }, [selectedChapterId]);
-
-  // --- Sponsored Visibility ---
-  const [showSponsored, setShowSponsored] = useState<boolean>(() => {
-    return sessionStorage.getItem('ivanchat_dismissed_sponsored') !== 'true';
-  });
 
   const [showChat, setShowChat] = useState(true);
 
@@ -363,10 +334,10 @@ const App: React.FC = () => {
     if (!activeChapter || !activeChapter.content.trim()) return alert("Chapter content is empty.");
     try {
       setIsGeneratingAudio(true);
-      setGenProgress(2);
+      setGenProgress(0);
       initAudioContext();
       
-      const maxChunkChars = 1500;
+      const maxChunkChars = 1200; // Slightly smaller chunks to ensure stability
       const textChunks: { text: string; start: number; end: number }[] = [];
       let currentChunkText = "";
       let currentStart = 0;
@@ -384,16 +355,24 @@ const App: React.FC = () => {
       }
       if (currentChunkText) textChunks.push({ text: currentChunkText, start: currentStart, end: currentStart + currentChunkText.length });
       
-      const audioPromises = textChunks.map(async (chunk) => {
+      // CRITICAL FIX: Sequential synthesis with forced await and micro-delay to prevent undici/SDK memory leaks
+      const results: { buffer: AudioBuffer; chunk: typeof textChunks[0]; sceneMeta: SceneMetadata }[] = [];
+      for (let i = 0; i < textChunks.length; i++) {
+        const chunk = textChunks[i];
+        // 1. Analyze scene
         const sceneMeta = await geminiService.analyzeScene(chunk.text);
+        // 2. Synthesize audio
         const base64 = await geminiService.textToSpeech(chunk.text, selectedTones, gender, pitch, includeBreaths, sceneMeta);
         const bytes = decodeBase64(base64);
         const buffer = await decodeAudioData(bytes, audioContextRef.current!, 24000, 1);
-        setGenProgress(prev => Math.min(98, prev + (95 / textChunks.length)));
-        return { buffer, chunk, sceneMeta };
-      });
+        
+        results.push({ buffer, chunk, sceneMeta });
+        setGenProgress(((i + 1) / textChunks.length) * 100);
+        
+        // Short pause to ensure the GC/Network stack clears previous listeners
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
       
-      const results = await Promise.all(audioPromises);
       const totalSamples = results.reduce((acc, r) => acc + r.buffer.length, 0);
       const mergedBuffer = audioContextRef.current!.createBuffer(1, totalSamples, 24000);
       let sampleOffset = 0;
@@ -418,10 +397,8 @@ const App: React.FC = () => {
       setDuration(mergedBuffer.duration);
       setCurrentTime(0);
       pausedTimeRef.current = 0;
-      setGenProgress(100);
       setViewMode('reader');
       
-      // PERSIST AUDIO TO DB
       const wavBlob = audioBufferToWav(mergedBuffer);
       await saveAudioToDB(`audio_${selectedChapterId}`, wavBlob);
       localStorage.setItem(`ivanchat_meta_${selectedChapterId}`, JSON.stringify(metadata));
@@ -431,7 +408,7 @@ const App: React.FC = () => {
       setTimeout(() => setIsGeneratingAudio(false), 800);
     } catch (e) {
       console.error(e);
-      alert("Synthesis encountered an error.");
+      alert("Synthesis engine error. Breaking the manuscript into smaller chapters often helps stability.");
       setIsGeneratingAudio(false);
     }
   };
@@ -455,7 +432,6 @@ const App: React.FC = () => {
     return () => { if (progressRequestRef.current) cancelAnimationFrame(progressRequestRef.current); };
   }, [isAudioPlaying, updateProgress]);
 
-  // --- Handlers ---
   const handleExportWav = () => {
     if (!currentAudioBufferRef.current) return;
     const blob = audioBufferToWav(currentAudioBufferRef.current);
@@ -786,7 +762,6 @@ const App: React.FC = () => {
         <div 
           className="flex-1 overflow-y-auto p-4 sm:p-8 lg:p-12 scrollbar-hide transition-[padding]" 
           ref={scrollContainerRef}
-          style={{ paddingBottom: showSponsored ? '200px' : undefined }}
         >
           <div className="max-w-4xl mx-auto space-y-8">
             <header className="flex justify-between items-center border-b dark:border-slate-800 pb-6">
@@ -856,7 +831,7 @@ const App: React.FC = () => {
                 <textarea 
                   value={novelText} 
                   onChange={e => setNovelText(e.target.value)} 
-                  placeholder="Paste or write your novel content here... Use # for Chapters!" 
+                  placeholder="Paste or write your novel content here..." 
                   className="w-full h-[75vh] p-8 sm:p-12 bg-white dark:bg-slate-900 rounded-[2rem] shadow-xl border-none focus:ring-4 focus:ring-indigo-600/5 font-serif text-xl leading-relaxed resize-none scrollbar-hide" 
                 />
               ) : (
@@ -886,7 +861,7 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* CHATBOT & AD COMPONENT */}
+        {/* CHATBOT */}
         {showChat && (
           <div className="absolute bottom-10 right-10 w-[420px] h-[650px] flex flex-col glass-panel rounded-[2.5rem] shadow-[0_50px_100px_-20px_rgba(0,0,0,0.2)] overflow-hidden border border-white dark:border-slate-800 transition-all z-50">
             <header className="p-8 bg-indigo-600 text-white flex justify-between items-center relative overflow-hidden group shrink-0">
@@ -912,7 +887,7 @@ const App: React.FC = () => {
                     <ChatBubbleLeftRightIcon className="w-8 h-8 text-indigo-400" />
                   </div>
                   <p className="text-xs font-bold uppercase tracking-widest">Analysis Engine Active</p>
-                  <p className="text-[10px] italic max-w-[180px] mx-auto">Ask about current chapter plot or character motivations.</p>
+                  <p className="text-[10px] italic max-w-[180px] mx-auto">Ask about plot or characters.</p>
                 </div>
               )}
               {messages.map((m) => (
