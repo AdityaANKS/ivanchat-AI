@@ -2,41 +2,58 @@
 import { GoogleGenAI, Modality, Type } from "@google/genai";
 import { ReadingTone, VoiceGender, CharacterBio, SceneMetadata } from "../types.ts";
 
+// Pool of keys for rotation to handle rate limits on Netlify
+const KEY_POOL = [
+  process.env.API_KEY,
+  process.env.GEMINI_API_KEY,
+  process.env.GEMINI_API_KEY_2,
+  process.env.GEMINI_API_KEY_3
+].filter((k): k is string => !!k);
+
+let currentKeyIndex = 0;
+
 /**
- * Returns a new AI client using the environment variable directly.
+ * Returns a new AI client using the current rotated key.
  */
 const getAIClient = () => {
-  return new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = KEY_POOL[currentKeyIndex % KEY_POOL.length] || process.env.API_KEY || "";
+  return new GoogleGenAI({ apiKey });
 };
 
 /**
- * Robust retry utility with exponential backoff.
+ * Robust retry utility with key rotation on rate limits (429) and exponential backoff.
  */
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 6): Promise<T> {
   let delay = 1000;
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await fn();
     } catch (e: any) {
-      const errorMsg = e.message?.toLowerCase() || "";
-      const isRetryable = (e.status === 429) || (e.status >= 500 && e.status <= 599) || errorMsg.includes('fetch');
+      const status = e.status || (e.message && e.message.match(/\d{3}/)?.[0]);
+      const isRateLimit = status == 429 || e.message?.toLowerCase().includes("rate limit") || e.message?.toLowerCase().includes("quota");
+      const isRetryable = isRateLimit || (status >= 500 && status <= 599) || e.message?.toLowerCase().includes("fetch");
 
       if (i === maxRetries - 1 || !isRetryable) {
         console.error(`Final API failure after ${i + 1} attempts:`, e);
         throw e;
       }
 
-      console.warn(`API error encountered, retrying in ${delay}ms (Attempt ${i + 1}/${maxRetries})...`);
+      if (isRateLimit && KEY_POOL.length > 1) {
+        currentKeyIndex++;
+        console.warn(`Rate limit hit. Rotating to key index ${currentKeyIndex % KEY_POOL.length}`);
+      }
+
+      console.warn(`API attempt ${i + 1} failed, retrying in ${delay}ms...`);
       await new Promise(r => setTimeout(r, delay));
-      delay *= 2; 
+      delay *= 1.5;
     }
   }
-  throw new Error("Unexpected retry loop termination");
+  throw new Error("Retry loop exhausted");
 }
 
 export const geminiService = {
   /**
-   * Generates a professional app logo.
+   * Generates a professional app logo with a simplified prompt for better reliability.
    */
   async generateAppLogo(): Promise<string> {
     return withRetry(async () => {
@@ -46,7 +63,7 @@ export const geminiService = {
         contents: {
           parts: [
             {
-              text: 'A professional, minimalist square app icon for “Ivanchat”, an AI conversation platform. The icon features a custom abstract logo mark formed from the letters “IV”, designed using clean white line-art with subtle geometric symmetry, accented by a soft indigo glow to represent intelligence and clarity, set against a deep navy blue background. Flat vector style, modern tech aesthetic, high contrast, centered composition, no text, no book, no chat bubbles, premium and scalable for favicon and mobile app icon use.',
+              text: 'Minimalist square app icon for a luxury literary AI called "Ivanchat". Style: Deep indigo background with a single clean white geometric line-art symbol representing a stylized "I" and "V" merged. High-end tech aesthetic, soft glowing edges, flat vector design, no text, no chat bubbles, premium feel.',
             },
           ],
         },
@@ -66,18 +83,15 @@ export const geminiService = {
     });
   },
 
-  /**
-   * Analyzes text for narrative metadata.
-   */
   async analyzeScene(text: string): Promise<SceneMetadata> {
     return withRetry(async () => {
       const ai = getAIClient();
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: `Analyze this scene for audiobook production. Identify mood, pacing, characters, and key emphasis phrases.
-        Return results in JSON format.
+        contents: `Analyze this literary scene. Identify mood, pacing, characters, and key phrases for audio production.
+        Return results in JSON.
         
-        Text sample: "${text.substring(0, 1500)}"`,
+        TEXT: "${text.substring(0, 1500)}"`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -93,58 +107,51 @@ export const geminiService = {
         }
       });
 
-      if (!response.text) throw new Error("Empty analysis response.");
+      if (!response.text) throw new Error("Empty analysis.");
       return JSON.parse(response.text.trim());
     });
   },
 
-  /**
-   * Generates expressive narrator audio.
-   */
   async textToSpeech(text: string, tones: ReadingTone[], gender: VoiceGender, pitch: number, breaths: boolean, metadata?: SceneMetadata): Promise<string> {
     return withRetry(async () => {
       const ai = getAIClient();
       const toneList = tones.length > 0 ? tones.map(t => t.toLowerCase()) : ['neutral'];
       const toneDescription = toneList.join(' + ');
-        
-      const prompt = `Act as a world-class voice actor. Narrate the following text using a ${gender.toLowerCase()} voice. 
-      Emotional blend: ${toneDescription}. 
-      ${metadata ? `Context: Mood is ${metadata.mood}, pacing is ${metadata.pacing}.` : ''}
-      Modulation: Pitch shift ${pitch}%, breaths ${breaths ? 'included' : 'excluded'}.
-      
-      TEXT: "${text}"`;
-      
       const voiceName = gender === VoiceGender.FEMALE ? 'Kore' : 'Fenrir';
+
+      const prompt = `Act as a world-class narrator. Voice this text: "${text}". 
+      Emotion: ${toneDescription}. 
+      Pitch shift: ${pitch}%. 
+      Breaths: ${breaths ? 'included' : 'excluded'}. 
+      ${metadata ? `Pacing: ${metadata.pacing}, Mood: ${metadata.mood}.` : ''}`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
         contents: [{ parts: [{ text: prompt }] }],
         config: {
-          temperature: 0.9,
+          temperature: 0.8,
           responseModalities: [Modality.AUDIO],
           speechConfig: {
             voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: voiceName },
+              prebuiltVoiceConfig: { voiceName },
             },
           },
         },
       });
 
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (!base64Audio) throw new Error("No audio data received.");
+      if (!base64Audio) throw new Error("No audio returned.");
       return base64Audio;
     });
   },
 
-  /**
-   * Extract key characters from manuscript.
-   */
   async extractCharacters(contextText: string): Promise<CharacterBio[]> {
     return withRetry(async () => {
       const ai = getAIClient();
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: `Identify characters and generate bios. Sample: ${contextText.substring(0, 10000)}...`,
+        contents: `Identify key characters from this manuscript. Return a JSON array.
+        SAMPLE: ${contextText.substring(0, 8000)}`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -163,56 +170,23 @@ export const geminiService = {
           }
         }
       });
-
-      if (!response.text) return [];
-      return JSON.parse(response.text.trim());
+      return JSON.parse(response.text || "[]");
     });
   },
 
-  /**
-   * Literary Analysis Chatbot.
-   */
-  async chat(message: string, contextText: string, characters: CharacterBio[], history: { role: 'user' | 'model', parts: { text: string }[] }[]): Promise<string> {
+  async chat(message: string, contextText: string, characters: CharacterBio[], history: any[]): Promise<string> {
     return withRetry(async () => {
       const ai = getAIClient();
-      const characterContext = characters.length > 0 
-        ? "CHARACTERS:\n" + characters.map(c => `- ${c.name} (${c.role}): ${c.description}`).join("\n")
-        : "";
-      
+      const charContext = characters.map(c => `${c.name} (${c.role}): ${c.description}`).join('\n');
       const chatInstance = ai.chats.create({
         model: 'gemini-3-pro-preview',
         config: {
-          systemInstruction: `You are an expert literary analysis chatbot. ${characterContext}\n\nNOVEL CONTEXT: ${contextText.substring(0, 10000)}...`,
+          systemInstruction: `You are an expert literary analyzer. Novel Context: ${contextText.substring(0, 10000)}...\n\nCharacters:\n${charContext}`,
         },
-        history: history
+        history
       });
-
       const response = await chatInstance.sendMessage({ message });
-      return response.text || "I'm having trouble analyzing the text at the moment.";
-    });
-  },
-
-  /**
-   * Transcribe user audio.
-   */
-  async transcribeAudio(base64Audio: string): Promise<string> {
-    return withRetry(async () => {
-      const ai = getAIClient();
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: 'audio/pcm;rate=16000',
-                data: base64Audio,
-              },
-            },
-            { text: "Transcribe accurately. Only return text." }
-          ]
-        }
-      });
-      return response.text ? response.text.trim() : "";
+      return response.text || "";
     });
   }
 };
