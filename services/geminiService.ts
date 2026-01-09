@@ -2,54 +2,33 @@
 import { GoogleGenAI, Modality, Type } from "@google/genai";
 import { ReadingTone, VoiceGender, CharacterBio, SceneMetadata } from "../types.ts";
 
-// Define a pool of keys for rotation
-const API_KEYS = [
-  process.env.API_KEY,
-  process.env.GEMINI_API_KEY,
-  process.env.GEMINI_API_KEY_2,
-  process.env.GEMINI_API_KEY_3
-].filter((key): key is string => Boolean(key));
-
-let currentKeyIndex = 0;
-
 /**
- * Returns a new AI client using the current active key in rotation.
+ * Returns a new AI client using the environment variable directly.
  */
 const getAIClient = () => {
-  // Use modulo to ensure we loop through the pool indefinitely
-  const apiKey = API_KEYS[currentKeyIndex % API_KEYS.length] || process.env.API_KEY || "";
-  return new GoogleGenAI({ apiKey });
+  return new GoogleGenAI({ apiKey: process.env.API_KEY });
 };
 
 /**
- * Robust retry utility with key rotation and exponential backoff.
- * If a 429 (Rate Limit) is detected, it switches to the next key in the pool.
+ * Robust retry utility with exponential backoff.
  */
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 6): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
   let delay = 1000;
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await fn();
     } catch (e: any) {
-      // Check for rate limit status codes or common error strings
       const errorMsg = e.message?.toLowerCase() || "";
-      const isRateLimit = e.status === 429 || errorMsg.includes('429') || errorMsg.includes('too many requests') || errorMsg.includes('quota');
-      const isRetryable = isRateLimit || (e.status >= 500 && e.status <= 599) || errorMsg.includes('fetch');
+      const isRetryable = (e.status === 429) || (e.status >= 500 && e.status <= 599) || errorMsg.includes('fetch');
 
       if (i === maxRetries - 1 || !isRetryable) {
-        console.error(`Final API failure after ${i + 1} attempts using Key Index ${currentKeyIndex % API_KEYS.length}:`, e);
+        console.error(`Final API failure after ${i + 1} attempts:`, e);
         throw e;
-      }
-
-      // If we hit a rate limit and have multiple keys, rotate immediately
-      if (isRateLimit && API_KEYS.length > 1) {
-        currentKeyIndex++;
-        console.warn(`Rate limit reached. Rotating to API Key ${currentKeyIndex % API_KEYS.length + 1} of ${API_KEYS.length}`);
       }
 
       console.warn(`API error encountered, retrying in ${delay}ms (Attempt ${i + 1}/${maxRetries})...`);
       await new Promise(r => setTimeout(r, delay));
-      delay *= 1.5; // Exponential backoff
+      delay *= 2; 
     }
   }
   throw new Error("Unexpected retry loop termination");
@@ -57,7 +36,7 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 6): Promise<T> {
 
 export const geminiService = {
   /**
-   * Generates a professional app logo with key-rotation fallback.
+   * Generates a professional app logo.
    */
   async generateAppLogo(): Promise<string> {
     return withRetry(async () => {
@@ -88,7 +67,7 @@ export const geminiService = {
   },
 
   /**
-   * Analyzes text for narrative metadata with key-rotation fallback.
+   * Analyzes text for narrative metadata.
    */
   async analyzeScene(text: string): Promise<SceneMetadata> {
     return withRetry(async () => {
@@ -120,7 +99,7 @@ export const geminiService = {
   },
 
   /**
-   * Generates expressive narrator audio with key-rotation fallback.
+   * Generates expressive narrator audio.
    */
   async textToSpeech(text: string, tones: ReadingTone[], gender: VoiceGender, pitch: number, breaths: boolean, metadata?: SceneMetadata): Promise<string> {
     return withRetry(async () => {
@@ -158,7 +137,7 @@ export const geminiService = {
   },
 
   /**
-   * Extract key characters from manuscript with key-rotation fallback.
+   * Extract key characters from manuscript.
    */
   async extractCharacters(contextText: string): Promise<CharacterBio[]> {
     return withRetry(async () => {
@@ -191,7 +170,7 @@ export const geminiService = {
   },
 
   /**
-   * Literary Analysis Chatbot with key-rotation fallback.
+   * Literary Analysis Chatbot.
    */
   async chat(message: string, contextText: string, characters: CharacterBio[], history: { role: 'user' | 'model', parts: { text: string }[] }[]): Promise<string> {
     return withRetry(async () => {
@@ -214,7 +193,7 @@ export const geminiService = {
   },
 
   /**
-   * Transcribe user audio with key-rotation fallback.
+   * Transcribe user audio.
    */
   async transcribeAudio(base64Audio: string): Promise<string> {
     return withRetry(async () => {

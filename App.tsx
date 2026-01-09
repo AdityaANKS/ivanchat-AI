@@ -2,12 +2,11 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { ReadingTone, VoiceGender, ChatMessage, CharacterBio, VoicePreset, ChatSession, SceneMetadata, Chapter } from './types.ts';
 import { geminiService } from './services/geminiService.ts';
-import { decodeBase64, decodeAudioData, floatTo16BitPCM, encodeBase64, audioBufferToWav, audioBufferToMp4, saveAudioToDB, getAudioFromDB } from './services/audioService.ts';
+import { decodeBase64, decodeAudioData, audioBufferToWav, audioBufferToMp4, saveAudioToDB, getAudioFromDB } from './services/audioService.ts';
 import { 
   PlayIcon, 
   PauseIcon, 
   ChatBubbleLeftRightIcon, 
-  MicrophoneIcon, 
   ArrowPathIcon,
   BookOpenIcon,
   AdjustmentsHorizontalIcon,
@@ -17,24 +16,19 @@ import {
   SunIcon,
   UserGroupIcon,
   SparklesIcon,
-  PlusIcon,
-  TrashIcon,
-  BookmarkIcon,
-  ClockIcon,
-  ArchiveBoxIcon,
-  ArrowDownTrayIcon,
-  XMarkIcon,
-  VariableIcon,
-  EyeIcon,
   PencilSquareIcon,
   HashtagIcon,
   ArrowDownOnSquareIcon,
+  ArrowDownTrayIcon,
   Bars3Icon,
   VideoCameraIcon,
   CheckCircleIcon,
   ExclamationCircleIcon,
   InformationCircleIcon,
-  CloudArrowUpIcon
+  CloudArrowUpIcon,
+  XMarkIcon,
+  ClockIcon,
+  EyeIcon
 } from '@heroicons/react/24/outline';
 
 interface AudioChunkMetadata {
@@ -74,48 +68,15 @@ const AdUnit: React.FC<{ className?: string; slot?: string }> = ({ className = '
 };
 
 const App: React.FC = () => {
-  // --- Logo Logic ---
+  // --- States ---
   const [appLogo, setAppLogo] = useState<string>(() => localStorage.getItem('ivanchat_app_logo') || '');
   const [isGeneratingLogo, setIsGeneratingLogo] = useState(false);
-
-  useEffect(() => {
-    const initLogo = async () => {
-      if (!appLogo) {
-        setIsGeneratingLogo(true);
-        try {
-          const generated = await geminiService.generateAppLogo();
-          setAppLogo(generated);
-          localStorage.setItem('ivanchat_app_logo', generated);
-          
-          let link = document.querySelector("link[rel*='icon']") as HTMLLinkElement;
-          if (!link) {
-            link = document.createElement('link');
-            link.rel = 'shortcut icon';
-            document.getElementsByTagName('head')[0].appendChild(link);
-          }
-          link.href = generated;
-        } catch (e) {
-          console.error("Logo generation failed:", e);
-        } finally {
-          setIsGeneratingLogo(false);
-        }
-      } else {
-        let link = document.querySelector("link[rel*='icon']") as HTMLLinkElement;
-        if (link) link.href = appLogo;
-      }
-    };
-    initLogo();
-  }, [appLogo]);
-
-  // --- Core States ---
   const [novelText, setNovelText] = useState<string>(() => localStorage.getItem('ivanchat_novel_text') || '');
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'drafting'>('saved');
   const [characters, setCharacters] = useState<CharacterBio[]>(() => {
     const stored = localStorage.getItem('ivanchat_characters');
     return stored ? JSON.parse(stored) : [];
   });
-  
-  const [isExtractingCharacters, setIsExtractingCharacters] = useState(false);
   const [selectedTones, setSelectedTones] = useState<ReadingTone[]>([ReadingTone.NEUTRAL]);
   const [gender, setGender] = useState<VoiceGender>(VoiceGender.MALE);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -123,86 +84,25 @@ const App: React.FC = () => {
   const [isChatting, setIsChatting] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isRenderingVideo, setIsRenderingVideo] = useState(false);
-  
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const stored = localStorage.getItem('ivanchat_theme');
     return stored ? stored === 'dark' : true;
   });
   const [viewMode, setViewMode] = useState<'editor' | 'reader'>('editor');
-  
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success') => {
-    const id = Date.now().toString();
-    setToasts(prev => [...prev, { id, message, type }]);
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4500);
-  }, []);
-
-  const chapters = useMemo(() => {
-    const textToParse = (novelText || '').trim();
-    if (!textToParse) return [{ id: 'full', title: 'Full Manuscript', content: '', startIndex: 0 }];
-    const chapterRegex = /(?:^|\n)(?:Chapter\s+\d+|#\s+.+|(?:CHAPTER|Chapter)\s+\w+)/gi;
-    let match;
-    const found: Chapter[] = [];
-    const matches: { index: number; text: string }[] = [];
-    while ((match = chapterRegex.exec(textToParse)) !== null) matches.push({ index: match.index, text: match[0].trim() });
-    if (matches.length === 0) {
-      found.push({ id: 'full', title: 'Full Manuscript', content: textToParse, startIndex: 0 });
-    } else {
-      for (let i = 0; i < matches.length; i++) {
-        const start = matches[i].index;
-        const end = matches[i + 1] ? matches[i + 1].index : textToParse.length;
-        found.push({ id: `ch-${i}`, title: matches[i].text, content: textToParse.substring(start, end), startIndex: start });
-      }
-    }
-    return found;
-  }, [novelText]);
-
-  const [selectedChapterId, setSelectedChapterId] = useState<string>('full');
-  const activeChapter = useMemo(() => chapters.find(c => c.id === selectedChapterId) || chapters[0], [chapters, selectedChapterId]);
-
-  const [chatSessions, setChatSessions] = useState<ChatSession[]>(() => JSON.parse(localStorage.getItem('ivanchat_chat_sessions') || '[]'));
-  const [presets, setPresets] = useState<VoicePreset[]>(() => JSON.parse(localStorage.getItem('ivanchat_presets') || '[]'));
-
-  // --- Auto-Save and Persistence Engine ---
-  const performSave = useCallback(() => {
-    setSaveStatus('saving');
-    localStorage.setItem('ivanchat_novel_text', novelText);
-    localStorage.setItem('ivanchat_characters', JSON.stringify(characters));
-    localStorage.setItem('ivanchat_presets', JSON.stringify(presets));
-    localStorage.setItem('ivanchat_chat_sessions', JSON.stringify(chatSessions));
-    localStorage.setItem('ivanchat_theme', isDarkMode ? 'dark' : 'light');
-    setTimeout(() => setSaveStatus('saved'), 600);
-  }, [novelText, characters, presets, chatSessions, isDarkMode]);
-
-  // Save on changes with debounce feedback
-  useEffect(() => {
-    if (saveStatus === 'saved') setSaveStatus('drafting');
-    const timer = setTimeout(performSave, 1500);
-    if (isDarkMode) document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-    return () => clearTimeout(timer);
-  }, [novelText, characters, presets, chatSessions, isDarkMode, performSave]);
-
-  // Background fail-safe save every 2 minutes
-  useEffect(() => {
-    const interval = setInterval(() => {
-      performSave();
-      console.log("Background persistent sync complete.");
-    }, 120000);
-    return () => clearInterval(interval);
-  }, [performSave]);
-
-  // --- Audio Engine ---
-  const [audioSpeed, setAudioSpeed] = useState(1.0);
+  const [audioSpeed, setAudioSpeed] = useState(1.0); // Default to 1.0x as requested
   const [pitch, setPitch] = useState(0);
   const [includeBreaths, setIncludeBreaths] = useState(true);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
+  const [isExtractingCharacters, setIsExtractingCharacters] = useState(false);
   const [genProgress, setGenProgress] = useState(0);
   const [audioChunks, setAudioChunks] = useState<AudioChunkMetadata[]>([]);
+  const [showChat, setShowChat] = useState(false);
 
+  // --- Refs ---
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
   const currentAudioBufferRef = useRef<AudioBuffer | null>(null);
@@ -212,30 +112,77 @@ const App: React.FC = () => {
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
+  // --- Utils ---
+  const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success') => {
+    const id = Date.now().toString();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4500);
+  }, []);
+
+  // --- Theme ---
   useEffect(() => {
-    const loadCachedAudio = async () => {
-      const cachedBlob = await getAudioFromDB(`audio_${selectedChapterId}`);
-      const cachedMetadata = localStorage.getItem(`ivanchat_meta_${selectedChapterId}`);
-      if (cachedBlob && cachedMetadata) {
-        if (!audioContextRef.current) audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-        const arrayBuffer = await cachedBlob.arrayBuffer();
-        const buffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
-        currentAudioBufferRef.current = buffer;
-        setAudioChunks(JSON.parse(cachedMetadata));
-        setDuration(buffer.duration);
-        setCurrentTime(0);
-        pausedTimeRef.current = 0;
-      } else {
-        currentAudioBufferRef.current = null;
-        setAudioChunks([]);
-        setDuration(0);
+    if (isDarkMode) document.documentElement.classList.add('dark');
+    else document.documentElement.classList.remove('dark');
+  }, [isDarkMode]);
+
+  // --- Auto-Save ---
+  const performSave = useCallback(() => {
+    setSaveStatus('saving');
+    localStorage.setItem('ivanchat_novel_text', novelText);
+    localStorage.setItem('ivanchat_characters', JSON.stringify(characters));
+    localStorage.setItem('ivanchat_theme', isDarkMode ? 'dark' : 'light');
+    setTimeout(() => setSaveStatus('saved'), 600);
+  }, [novelText, characters, isDarkMode]);
+
+  useEffect(() => {
+    if (saveStatus === 'saved') setSaveStatus('drafting');
+    const timer = setTimeout(performSave, 1500);
+    return () => clearTimeout(timer);
+  }, [novelText, characters, performSave]);
+
+  // --- Logo Generation ---
+  useEffect(() => {
+    const initLogo = async () => {
+      if (!appLogo) {
+        setIsGeneratingLogo(true);
+        try {
+          const generated = await geminiService.generateAppLogo();
+          setAppLogo(generated);
+          localStorage.setItem('ivanchat_app_logo', generated);
+        } catch (e) {
+          console.error("Logo generation failed:", e);
+        } finally {
+          setIsGeneratingLogo(false);
+        }
       }
     };
-    loadCachedAudio();
-  }, [selectedChapterId]);
+    initLogo();
+  }, [appLogo]);
 
-  const [showChat, setShowChat] = useState(false);
+  // --- Chapter Logic ---
+  const chapters = useMemo(() => {
+    const textToParse = (novelText || '').trim();
+    if (!textToParse) return [{ id: 'full', title: 'Full Manuscript', content: '', startIndex: 0 }];
+    const chapterRegex = /(?:^|\n)(?:Chapter\s+\d+|#\s+.+|(?:CHAPTER|Chapter)\s+\w+)/gi;
+    let match;
+    const found: Chapter[] = [];
+    while ((match = chapterRegex.exec(textToParse)) !== null) {
+      const start = match.index;
+      const end = textToParse.indexOf('\n', chapterRegex.lastIndex);
+      found.push({ id: `ch-${found.length}`, title: match[0].trim(), content: '', startIndex: start });
+    }
+    if (found.length === 0) return [{ id: 'full', title: 'Full Manuscript', content: textToParse, startIndex: 0 }];
+    
+    return found.map((ch, i) => {
+      const nextStart = found[i + 1] ? found[i + 1].startIndex : textToParse.length;
+      return { ...ch, content: textToParse.substring(ch.startIndex, nextStart) };
+    });
+  }, [novelText]);
 
+  const [selectedChapterId, setSelectedChapterId] = useState<string>('full');
+  const activeChapter = useMemo(() => chapters.find(c => c.id === selectedChapterId) || chapters[0], [chapters, selectedChapterId]);
+
+  // --- Text Analysis & Highlighting Prep ---
   const processedData = useMemo(() => {
     if (!activeChapter) return [];
     const text = activeChapter.content;
@@ -257,6 +204,7 @@ const App: React.FC = () => {
     });
   }, [activeChapter]);
 
+  // --- Audio Progress & Tracking ---
   const estimatedCharPos = useMemo(() => {
     if (audioChunks.length === 0 || duration === 0 || !activeChapter) return 0;
     const chunk = audioChunks.find(c => currentTime >= c.audioStart && currentTime <= c.audioEnd);
@@ -296,15 +244,23 @@ const App: React.FC = () => {
     }
   }, [activeIndices.activeWordIdx, viewMode]);
 
+  // --- Playback Controls ---
   const playBuffer = (buffer: AudioBuffer, offset: number) => {
-    if (!audioContextRef.current) return;
+    if (!audioContextRef.current) audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+    if (audioContextRef.current.state === 'suspended') audioContextRef.current.resume();
+    
     if (sourceNodeRef.current) sourceNodeRef.current.stop();
     const source = audioContextRef.current.createBufferSource();
     source.buffer = buffer;
     source.playbackRate.value = audioSpeed;
     source.connect(audioContextRef.current.destination);
-    source.onended = () => { if (audioContextRef.current!.currentTime >= startTimeRef.current + (buffer.duration / audioSpeed) - 0.2) setIsAudioPlaying(false); };
-    source.start(audioContextRef.current.currentTime, offset / audioSpeed);
+    
+    source.onended = () => {
+       const elapsedSinceStart = (audioContextRef.current!.currentTime - startTimeRef.current) * audioSpeed;
+       if (elapsedSinceStart >= buffer.duration - 0.2) setIsAudioPlaying(false);
+    };
+
+    source.start(0, offset / audioSpeed);
     sourceNodeRef.current = source;
     startTimeRef.current = audioContextRef.current.currentTime - (offset / audioSpeed);
   };
@@ -317,80 +273,20 @@ const App: React.FC = () => {
         pausedTimeRef.current = (audioContextRef.current!.currentTime - startTimeRef.current) * audioSpeed;
       }
       setIsAudioPlaying(false);
-      addToast("Narration paused", "info");
+      addToast("Paused", "info");
     } else {
-      if (!audioContextRef.current) audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      if (audioContextRef.current.state === 'suspended') audioContextRef.current.resume();
       const startAt = pausedTimeRef.current >= currentAudioBufferRef.current.duration ? 0 : pausedTimeRef.current;
       playBuffer(currentAudioBufferRef.current, startAt);
       setIsAudioPlaying(true);
-      addToast("Resuming narration", "success");
+      addToast("Playing", "success");
     }
   };
 
-  const startSynthesis = async () => {
-    if (!activeChapter?.content.trim()) return addToast("Manuscript is empty!", "error");
-    try {
-      setIsGeneratingAudio(true);
-      setGenProgress(0);
-      setIsSidebarOpen(false);
-      
-      const maxChars = 800;
-      const chunks: { text: string; start: number; end: number }[] = [];
-      let curText = "";
-      let curStart = 0;
-      for (const s of processedData) {
-        if ((curText + s.text).length > maxChars && curText.length > 0) {
-          chunks.push({ text: curText, start: curStart, end: curStart + curText.length });
-          curText = s.text; curStart = s.start;
-        } else {
-          if (curText === "") curStart = s.start;
-          curText += s.text;
-        }
-      }
-      if (curText) chunks.push({ text: curText, start: curStart, end: curStart + curText.length });
-      
-      const results = [];
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      for (let i = 0; i < chunks.length; i++) {
-        const c = chunks[i];
-        const meta = await geminiService.analyzeScene(c.text);
-        const b64 = await geminiService.textToSpeech(c.text, selectedTones, gender, pitch, includeBreaths, meta);
-        const buffer = await decodeAudioData(decodeBase64(b64), ctx, 24000, 1);
-        results.push({ buffer, chunk: c, meta });
-        setGenProgress(((i + 1) / chunks.length) * 100);
-        await new Promise(r => setTimeout(r, 200));
-      }
-      
-      const totalSamples = results.reduce((acc, r) => acc + r.buffer.length, 0);
-      const merged = ctx.createBuffer(1, totalSamples, 24000);
-      let sOff = 0, tOff = 0;
-      const metaArr: AudioChunkMetadata[] = [];
-      results.forEach(r => {
-        merged.getChannelData(0).set(r.buffer.getChannelData(0), sOff);
-        metaArr.push({ charStart: r.chunk.start, charEnd: r.chunk.end, audioStart: tOff, audioEnd: tOff + r.buffer.duration, scene: r.meta });
-        sOff += r.buffer.length; tOff += r.buffer.duration;
-      });
-
-      currentAudioBufferRef.current = merged;
-      setAudioChunks(metaArr);
-      setDuration(merged.duration);
-      setCurrentTime(0);
-      pausedTimeRef.current = 0;
-      setViewMode('reader');
-      
-      await saveAudioToDB(`audio_${selectedChapterId}`, audioBufferToWav(merged));
-      localStorage.setItem(`ivanchat_meta_${selectedChapterId}`, JSON.stringify(metaArr));
-      
-      audioContextRef.current = ctx;
-      playBuffer(merged, 0);
-      setIsAudioPlaying(true);
-      addToast("Full chapter synthesized!", "success");
-      setTimeout(() => setIsGeneratingAudio(false), 800);
-    } catch (e) {
-      console.error(e);
-      addToast("Audio synthesis failed. Retrying may fix transient issues.", "error");
-      setIsGeneratingAudio(false);
+  const handleSeek = (v: number) => {
+    setCurrentTime(v);
+    pausedTimeRef.current = v;
+    if (isAudioPlaying && currentAudioBufferRef.current) {
+      playBuffer(currentAudioBufferRef.current, v);
     }
   };
 
@@ -413,58 +309,146 @@ const App: React.FC = () => {
     return () => { if (progressRequestRef.current) cancelAnimationFrame(progressRequestRef.current); };
   }, [isAudioPlaying, updateProgress]);
 
+  // --- Synthesis (Parallel Processing) ---
+  const startSynthesis = async () => {
+    if (!activeChapter?.content.trim()) return addToast("Provide manuscript text", "error");
+    try {
+      setIsGeneratingAudio(true);
+      setGenProgress(0);
+      setIsSidebarOpen(false);
+      
+      const maxChars = 900;
+      const rawChunks: { text: string; start: number; end: number }[] = [];
+      let currentBatchText = "";
+      let currentBatchStart = 0;
+      
+      for (const s of processedData) {
+        if ((currentBatchText + s.text).length > maxChars && currentBatchText.length > 0) {
+          rawChunks.push({ text: currentBatchText, start: currentBatchStart, end: currentBatchStart + currentBatchText.length });
+          currentBatchText = s.text;
+          currentBatchStart = s.start;
+        } else {
+          if (currentBatchText === "") currentBatchStart = s.start;
+          currentBatchText += s.text;
+        }
+      }
+      if (currentBatchText) rawChunks.push({ text: currentBatchText, start: currentBatchStart, end: currentBatchStart + currentBatchText.length });
+      
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      const results: { buffer: AudioBuffer; meta: SceneMetadata; chunk: any }[] = new Array(rawChunks.length);
+      
+      const concurrencyLimit = 5;
+      for (let i = 0; i < rawChunks.length; i += concurrencyLimit) {
+        const batch = rawChunks.slice(i, i + concurrencyLimit);
+        await Promise.all(batch.map(async (c, bIdx) => {
+          const globalIdx = i + bIdx;
+          const meta = await geminiService.analyzeScene(c.text);
+          const b64 = await geminiService.textToSpeech(c.text, selectedTones, gender, pitch, includeBreaths, meta);
+          const buffer = await decodeAudioData(decodeBase64(b64), ctx, 24000, 1);
+          results[globalIdx] = { buffer, meta, chunk: c };
+          setGenProgress((results.filter(Boolean).length / rawChunks.length) * 100);
+        }));
+      }
+      
+      const totalSamples = results.reduce((acc, r) => acc + r.buffer.length, 0);
+      const merged = ctx.createBuffer(1, totalSamples, 24000);
+      let sampleOffset = 0;
+      let timeOffset = 0;
+      const metaArr: AudioChunkMetadata[] = [];
+
+      results.forEach(r => {
+        merged.getChannelData(0).set(r.buffer.getChannelData(0), sampleOffset);
+        metaArr.push({
+          charStart: r.chunk.start,
+          charEnd: r.chunk.end,
+          audioStart: timeOffset,
+          audioEnd: timeOffset + r.buffer.duration,
+          scene: r.meta
+        });
+        sampleOffset += r.buffer.length;
+        timeOffset += r.buffer.duration;
+      });
+
+      currentAudioBufferRef.current = merged;
+      setAudioChunks(metaArr);
+      setDuration(merged.duration);
+      setCurrentTime(0);
+      pausedTimeRef.current = 0;
+      setViewMode('reader');
+      
+      await saveAudioToDB(`audio_${selectedChapterId}`, audioBufferToWav(merged));
+      localStorage.setItem(`ivanchat_meta_${selectedChapterId}`, JSON.stringify(metaArr));
+      
+      audioContextRef.current = ctx;
+      playBuffer(merged, 0);
+      setIsAudioPlaying(true);
+      addToast("Audiobook ready", "success");
+      setIsGeneratingAudio(false);
+    } catch (e) {
+      console.error(e);
+      addToast("Synthesis failed. Check connectivity.", "error");
+      setIsGeneratingAudio(false);
+    }
+  };
+
+  // --- Exports & Utils ---
   const handleExportWav = () => {
-    if (!currentAudioBufferRef.current) return addToast("No audio to export", "error");
+    if (!currentAudioBufferRef.current) return addToast("No narration found", "error");
     const blob = audioBufferToWav(currentAudioBufferRef.current);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Ivanchat_${(activeChapter?.title || 'Chapter').replace(/\s+/g, '_')}.wav`;
+    a.download = `Ivanchat_${(activeChapter?.title || 'Story').replace(/\s+/g, '_')}.wav`;
     a.click();
     URL.revokeObjectURL(url);
-    addToast("WAV export started", "success");
+    addToast("WAV Downloaded", "success");
   };
 
   const handleExportMp4 = async () => {
-    if (!currentAudioBufferRef.current) return addToast("No narration found", "error");
+    if (!currentAudioBufferRef.current) return addToast("Generate audio first", "error");
     setIsRenderingVideo(true);
-    addToast("Starting high-fidelity video render...", "info");
     try {
-      const blob = await audioBufferToMp4(currentAudioBufferRef.current, activeChapter?.title || 'Untitled', appLogo);
+      const blob = await audioBufferToMp4(currentAudioBufferRef.current, activeChapter?.title || 'Narration', appLogo);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `Ivanchat_${(activeChapter?.title || 'Narrative').replace(/\s+/g, '_')}.webm`;
       a.click();
       URL.revokeObjectURL(url);
-      addToast("Video downloaded successfully", "success");
+      addToast("Video Rendered", "success");
     } catch (e) {
-      addToast("Video render error", "error");
+      addToast("Video failed", "error");
     } finally {
       setIsRenderingVideo(false);
     }
   };
 
-  const handleSaveChat = () => {
-    if (messages.length === 0) return addToast("No conversation to save", "info");
-    const s: ChatSession = { id: Date.now().toString(), name: `Session ${chatSessions.length + 1}`, messages: [...messages], lastUpdated: new Date() };
-    setChatSessions(prev => [s, ...prev]);
-    addToast("Literary discussion archived");
-  };
-
   const handleExtractCharacters = async () => {
-    if (!novelText.trim()) return addToast("Provide manuscript text first", "info");
+    if (!novelText.trim()) return addToast("Manuscript is empty", "info");
     setIsExtractingCharacters(true);
-    addToast("Analyzing characters...", "info");
     try {
       const result = await geminiService.extractCharacters(novelText);
       setCharacters(result);
-      addToast(`${result.length} characters identified`, "success");
+      addToast(`${result.length} characters found`, "success");
     } catch (e) { 
-      addToast("Character analysis failed", "error"); 
+      addToast("Analysis failed", "error"); 
     } finally { 
       setIsExtractingCharacters(false); 
     }
+  };
+
+  // --- Chat Functions ---
+  const handleSaveChat = () => {
+    if (messages.length === 0) return addToast("No messages to archive", "info");
+    const chatContent = messages.map(m => `[${m.role.toUpperCase()}] ${m.timestamp.toLocaleString()}:\n${m.text}`).join('\n\n---\n\n');
+    const blob = new Blob([chatContent], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Ivanchat_Archive_${new Date().toISOString().split('T')[0]}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+    addToast("Chat history archived", "success");
   };
 
   const handleSendMessage = async () => {
@@ -478,7 +462,7 @@ const App: React.FC = () => {
       const response = await geminiService.chat(userInput, novelText, characters, hist);
       setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: response, timestamp: new Date() }]);
     } catch (e) { 
-      addToast("Literary AI is currently disconnected", "error"); 
+      addToast("AI Offline", "error"); 
     } finally { 
       setIsChatting(false); 
     }
@@ -511,15 +495,12 @@ const App: React.FC = () => {
            <div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center animate-spin mb-6">
              <VideoCameraIcon className="w-10 h-10 text-white" />
            </div>
-           <h2 className="text-2xl font-bold mb-2">Rendering WebM Video...</h2>
-           <p className="text-slate-400 text-center max-w-sm">Generating immersive visual background with fixed branding. High-fidelity output in progress.</p>
+           <h2 className="text-2xl font-bold mb-2">Generating WebM...</h2>
+           <p className="text-slate-400 text-center max-w-sm">Combining narration and branding into high-quality video format.</p>
         </div>
       )}
 
-      {/* MOBILE OVERLAY */}
-      {isSidebarOpen && <div className="fixed inset-0 bg-black/50 z-30 lg:hidden transition-opacity duration-300" onClick={() => setIsSidebarOpen(false)} />}
-
-      {/* SIDEBAR (MENU BAR) */}
+      {/* SIDEBAR */}
       <aside className={`
         fixed inset-y-0 left-0 z-40 w-[280px] sm:w-[320px] bg-white dark:bg-slate-900 border-r dark:border-slate-800 shadow-2xl transition-transform duration-300 transform 
         lg:translate-x-0 lg:static lg:block lg:shadow-none
@@ -539,7 +520,7 @@ const App: React.FC = () => {
 
         <div className="p-6 flex-1 overflow-y-auto space-y-8 scrollbar-hide">
           <section>
-            <div className="flex items-center gap-2 mb-4 text-slate-400 font-bold uppercase text-[10px] tracking-widest"><EyeIcon className="w-4 h-4" /> Workspace Mode</div>
+            <div className="flex items-center gap-2 mb-4 text-slate-400 font-bold uppercase text-[10px] tracking-widest"><EyeIcon className="w-4 h-4" /> Workspace</div>
             <div className="flex p-1 bg-slate-100 dark:bg-slate-800 rounded-xl">
               <button onClick={() => setViewMode('editor')} className={`flex-1 py-2 text-xs rounded-lg transition-all flex items-center justify-center gap-2 ${viewMode === 'editor' ? 'bg-white dark:bg-slate-700 shadow-sm font-bold text-indigo-600' : 'text-slate-400'}`}><PencilSquareIcon className="w-4 h-4" /> Editor</button>
               <button onClick={() => setViewMode('reader')} className={`flex-1 py-2 text-xs rounded-lg transition-all flex items-center justify-center gap-2 ${viewMode === 'reader' ? 'bg-white dark:bg-slate-700 shadow-sm font-bold text-indigo-600' : 'text-slate-400'}`}><BookOpenIcon className="w-4 h-4" /> Reader</button>
@@ -560,11 +541,11 @@ const App: React.FC = () => {
 
           <section>
             <div className="flex items-center justify-between mb-4">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2"><UserGroupIcon className="w-4 h-4" /> Characters</span>
-              <button onClick={handleExtractCharacters} disabled={isExtractingCharacters} title="Identify characters" className="text-indigo-600 disabled:opacity-30"><SparklesIcon className={`w-4 h-4 ${isExtractingCharacters ? 'animate-pulse' : ''}`} /></button>
+              <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2"><UserGroupIcon className="w-4 h-4" /> Cast</span>
+              <button onClick={handleExtractCharacters} disabled={isExtractingCharacters} className="text-indigo-600 disabled:opacity-30"><SparklesIcon className={`w-4 h-4 ${isExtractingCharacters ? 'animate-pulse' : ''}`} /></button>
             </div>
             <div className="space-y-2">
-              {characters.length === 0 ? <div className="text-[10px] text-center p-4 border border-dashed rounded-lg opacity-40 italic">Scan text to find characters...</div> : characters.slice(0, 4).map((c, i) => (
+              {characters.length === 0 ? <div className="text-[10px] text-center p-4 border border-dashed rounded-lg opacity-40 italic">Analyze manuscript...</div> : characters.slice(0, 4).map((c, i) => (
                 <div key={i} className="bg-slate-50 dark:bg-slate-800/50 p-3 rounded-xl border dark:border-slate-800">
                   <div className="flex justify-between items-center mb-1"><span className="text-xs font-bold">{c.name}</span><span className="text-[8px] uppercase px-1 bg-slate-200 dark:bg-slate-700 rounded font-mono">{c.role}</span></div>
                   <p className="text-[10px] text-slate-500 dark:text-slate-400 line-clamp-1">{c.description}</p>
@@ -574,16 +555,7 @@ const App: React.FC = () => {
           </section>
 
           <section>
-            <div className="flex items-center gap-2 mb-4 text-slate-400 font-bold uppercase text-[10px] tracking-widest"><UserIcon className="w-4 h-4" /> Voice Synthesis</div>
-            <div className="flex p-1 bg-slate-100 dark:bg-slate-800 rounded-xl">
-              {Object.values(VoiceGender).map(g => (
-                <button key={g} onClick={() => setGender(g)} className={`flex-1 py-2 text-xs rounded-lg transition-all ${gender === g ? 'bg-white dark:bg-slate-700 shadow-sm font-bold text-indigo-600' : 'text-slate-400'}`}>{g}</button>
-              ))}
-            </div>
-          </section>
-
-          <section>
-            <div className="flex items-center gap-2 mb-4 text-slate-400 font-bold uppercase text-[10px] tracking-widest"><AdjustmentsHorizontalIcon className="w-4 h-4" /> Narrative Blend</div>
+            <div className="flex items-center gap-2 mb-4 text-slate-400 font-bold uppercase text-[10px] tracking-widest"><AdjustmentsHorizontalIcon className="w-4 h-4" /> Performance</div>
             <div className="grid grid-cols-2 gap-2">
               {Object.values(ReadingTone).map(t => (
                 <button key={t} onClick={() => setSelectedTones(prev => prev.includes(t) ? (prev.length > 1 ? prev.filter(x => x !== t) : prev) : [...prev, t])} className={`px-2 py-2 rounded-lg text-[10px] border transition-all ${selectedTones.includes(t) ? 'bg-indigo-600 border-indigo-600 text-white shadow-md' : 'border-slate-200 dark:border-slate-800 text-slate-400 hover:border-indigo-300'}`}>{t}</button>
@@ -592,10 +564,10 @@ const App: React.FC = () => {
           </section>
 
           <section className="space-y-4">
-            <div className="flex items-center gap-2 text-slate-400 font-bold uppercase text-[10px] tracking-widest"><VariableIcon className="w-4 h-4" /> Modulation</div>
+            <div className="flex items-center gap-2 text-slate-400 font-bold uppercase text-[10px] tracking-widest"><UserIcon className="w-4 h-4" /> Voice Modulation</div>
             <div className="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-xl space-y-4 border dark:border-slate-800">
                <div className="space-y-1">
-                  <div className="flex justify-between text-[10px] font-bold"><span>Pitch</span><span>{pitch}%</span></div>
+                  <div className="flex justify-between text-[10px] font-bold"><span>Pitch Offset</span><span>{pitch}%</span></div>
                   <input type="range" min="-30" max="30" value={pitch} onChange={e => setPitch(parseInt(e.target.value))} className="w-full h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
                </div>
                <div className="flex items-center justify-between text-[10px] font-bold uppercase">
@@ -605,10 +577,10 @@ const App: React.FC = () => {
             </div>
           </section>
 
-          <section className="pb-8 lg:pb-0">
+          <section className="pb-8">
             <button onClick={startSynthesis} disabled={isGeneratingAudio} className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold text-sm shadow-xl shadow-indigo-600/20 hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50">
               {isGeneratingAudio ? <ArrowPathIcon className="w-5 h-5 animate-spin" /> : <PlayIcon className="w-5 h-5" />}
-              {isGeneratingAudio ? `Synthesizing ${Math.round(genProgress)}%` : 'Generate Audiobook'}
+              {isGeneratingAudio ? `Encoding ${Math.round(genProgress)}%` : 'Generate Audiobook'}
             </button>
           </section>
         </div>
@@ -624,7 +596,7 @@ const App: React.FC = () => {
             <div className="w-6 h-6 bg-indigo-600 rounded-lg overflow-hidden shadow-md">
               <img src={appLogo} alt="Logo" className="w-full h-full object-cover" />
             </div>
-            <span className="font-bold text-sm">Ivanchat</span>
+            <span className="font-bold text-sm tracking-tight">Ivanchat</span>
           </div>
           <button onClick={() => setShowChat(!showChat)} className={`p-2 rounded-xl transition-colors ${showChat ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800'}`}><ChatBubbleLeftRightIcon className="w-6 h-6" /></button>
         </header>
@@ -639,50 +611,72 @@ const App: React.FC = () => {
                 <div>
                   <h2 className="text-3xl font-serif font-bold text-slate-800 dark:text-slate-100">{viewMode === 'editor' ? 'Manuscript Editor' : 'Immersive Reader'}</h2>
                   <div className="flex items-center gap-3 mt-1">
-                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{activeChapter?.title || 'No chapter selected'}</p>
+                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{activeChapter?.title || 'Draft'}</p>
                     <div className="w-px h-3 bg-slate-300 dark:bg-slate-700" />
-                    <div className="flex items-center gap-1.5 transition-all duration-300">
-                      <div className={`w-1.5 h-1.5 rounded-full ${saveStatus === 'saved' ? 'bg-emerald-500' : saveStatus === 'saving' ? 'bg-indigo-500 animate-pulse' : 'bg-amber-400'}`} />
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                        {saveStatus === 'saved' ? 'All changes saved' : saveStatus === 'saving' ? 'Saving progress...' : 'Drafting...'}
-                      </span>
+                    <div className="flex items-center gap-1.5 transition-all">
+                      <div className={`w-1.5 h-1.5 rounded-full ${saveStatus === 'saved' ? 'bg-emerald-500' : 'bg-amber-400 animate-pulse'}`} />
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{saveStatus}</span>
                     </div>
                   </div>
                 </div>
               </div>
               <div className="flex items-center gap-6">
                 <div className="flex items-center gap-2 px-3 py-1 bg-slate-100 dark:bg-slate-800 rounded-full text-[10px] font-bold text-slate-400 uppercase"><ClockIcon className="w-3 h-3" /><span>{(activeChapter?.content || '').split(/\s+/).length} Words</span></div>
-                <button onClick={() => { setNovelText(''); setCharacters([]); setMessages([]); addToast("Workspace cleared", "info"); }} className="text-[10px] text-slate-400 hover:text-red-500 font-bold uppercase tracking-widest transition-colors">Clear All</button>
+                <button onClick={() => { setNovelText(''); setCharacters([]); setMessages([]); addToast("Reset Complete", "info"); }} className="text-[10px] text-slate-400 hover:text-red-500 font-bold uppercase tracking-widest transition-colors">Clear Workspace</button>
               </div>
             </header>
 
             <article className="flex-1 pb-12">
               {viewMode === 'reader' && duration > 0 && (
                 <div className="sticky top-0 z-20 py-4 bg-slate-50/90 dark:bg-slate-950/90 backdrop-blur-md mb-8">
-                   <div className="flex flex-col sm:flex-row items-center gap-4">
-                      <div className="flex items-center gap-4 w-full sm:w-auto">
-                        <button onClick={togglePlayback} className="p-4 bg-indigo-600 text-white rounded-full shadow-lg shrink-0 transition-transform active:scale-90">
-                          {isAudioPlaying ? <PauseIcon className="w-6 h-6" /> : <PlayIcon className="w-6 h-6" />}
-                        </button>
-                        <div className="sm:hidden flex-1 space-y-1">
-                           <div className="flex justify-between text-[9px] font-mono font-bold text-slate-400"><span>{new Date(currentTime * 1000).toISOString().substr(14, 5)}</span><span>{new Date(duration * 1000).toISOString().substr(14, 5)}</span></div>
-                           <input type="range" min="0" max={duration} step="0.1" value={currentTime} onChange={e => { const v = parseFloat(e.target.value); setCurrentTime(v); pausedTimeRef.current = v; if (isAudioPlaying) playBuffer(currentAudioBufferRef.current!, v); }} className="w-full h-1 accent-indigo-600 bg-slate-200 dark:bg-slate-800 rounded-full appearance-none cursor-pointer" />
+                   <div className="flex items-center gap-4 bg-slate-900 text-white p-4 rounded-3xl shadow-2xl border border-white/5">
+                      <button onClick={togglePlayback} className="w-14 h-14 bg-indigo-600 rounded-full shadow-lg shadow-indigo-600/30 flex items-center justify-center transition-transform active:scale-90 hover:bg-indigo-500 shrink-0">
+                        {isAudioPlaying ? <PauseIcon className="w-7 h-7" /> : <PlayIcon className="w-7 h-7 ml-1" />}
+                      </button>
+                      
+                      <div className="flex-1 flex flex-col gap-2">
+                        <div className="flex justify-between items-end px-1">
+                          <span className="text-[10px] font-mono text-indigo-400 font-bold tracking-widest">
+                            {new Date(currentTime * 1000).toISOString().substr(14, 5)}
+                          </span>
+                          <span className="text-[10px] font-mono text-slate-500 font-bold tracking-widest">
+                            {new Date(duration * 1000).toISOString().substr(14, 5)}
+                          </span>
+                        </div>
+                        <div className="relative h-6 group flex items-center">
+                          <input 
+                            type="range" 
+                            min="0" 
+                            max={duration} 
+                            step="0.01" 
+                            value={currentTime} 
+                            onChange={e => handleSeek(parseFloat(e.target.value))} 
+                            className="absolute inset-0 w-full h-1 bg-slate-800 rounded-full appearance-none cursor-pointer accent-indigo-500 z-10" 
+                          />
+                          <div className="absolute left-0 h-1 bg-indigo-500 rounded-full pointer-events-none" style={{ width: `${(currentTime / duration) * 100}%` }} />
                         </div>
                       </div>
-                      <div className="hidden sm:block flex-1 space-y-1">
-                        <div className="flex justify-between text-[9px] font-mono font-bold text-slate-400"><span>{new Date(currentTime * 1000).toISOString().substr(14, 5)}</span><span>{new Date(duration * 1000).toISOString().substr(14, 5)}</span></div>
-                        <input type="range" min="0" max={duration} step="0.1" value={currentTime} onChange={e => { const v = parseFloat(e.target.value); setCurrentTime(v); pausedTimeRef.current = v; if (isAudioPlaying) playBuffer(currentAudioBufferRef.current!, v); }} className="w-full h-1 accent-indigo-600 bg-slate-200 dark:bg-slate-800 rounded-full appearance-none cursor-pointer" />
-                      </div>
-                      <div className="flex items-center justify-between w-full sm:w-auto gap-4">
-                         <div className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-slate-800 rounded-xl border dark:border-slate-700 shadow-sm flex-1 sm:flex-none justify-center">
+
+                      <div className="flex items-center gap-2 shrink-0">
+                         <div className="flex items-center gap-2 px-4 py-2 bg-slate-800 rounded-2xl border border-white/5">
                             <SpeakerWaveIcon className="w-4 h-4 text-slate-400" />
-                            <select value={audioSpeed} onChange={e => setAudioSpeed(parseFloat(e.target.value))} className="bg-transparent text-xs font-bold outline-none border-none cursor-pointer">
-                               <option value="0.75">0.75x</option><option value="1.0">1.0x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2.0">2.0x</option>
+                            <select value={audioSpeed} onChange={e => {
+                               const newSpeed = parseFloat(e.target.value);
+                               setAudioSpeed(newSpeed);
+                               if (isAudioPlaying && currentAudioBufferRef.current) {
+                                  playBuffer(currentAudioBufferRef.current, currentTime);
+                                }
+                            }} className="bg-transparent text-xs font-bold outline-none border-none cursor-pointer text-white">
+                               <option className="bg-slate-900" value="0.75">0.75x</option>
+                               <option className="bg-slate-900" value="1.0">1.0x</option>
+                               <option className="bg-slate-900" value="1.25">1.25x</option>
+                               <option className="bg-slate-900" value="1.5">1.5x</option>
+                               <option className="bg-slate-900" value="2.0">2.0x</option>
                             </select>
                          </div>
-                         <div className="flex gap-2">
-                            <button onClick={handleExportWav} title="WAV" className="p-3 bg-slate-100 dark:bg-slate-800 rounded-xl hover:text-indigo-600 transition-colors"><ArrowDownOnSquareIcon className="w-5 h-5" /></button>
-                            <button onClick={handleExportMp4} title="Video" className="p-3 bg-slate-100 dark:bg-slate-800 rounded-xl hover:text-indigo-600 transition-colors"><VideoCameraIcon className="w-5 h-5" /></button>
+                         <div className="flex gap-1.5">
+                            <button onClick={handleExportWav} title="Download WAV" className="p-3 bg-slate-800 rounded-2xl border border-white/5 hover:text-indigo-400 transition-colors"><ArrowDownOnSquareIcon className="w-5 h-5" /></button>
+                            <button onClick={handleExportMp4} title="Download Video" className="p-3 bg-slate-800 rounded-2xl border border-white/5 hover:text-indigo-400 transition-colors"><VideoCameraIcon className="w-5 h-5" /></button>
                          </div>
                       </div>
                    </div>
@@ -694,19 +688,19 @@ const App: React.FC = () => {
                   <div className="absolute top-4 right-4 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
                      <div className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-sm px-3 py-1.5 rounded-full flex items-center gap-2 border dark:border-slate-700 shadow-sm">
                         <CloudArrowUpIcon className="w-3.5 h-3.5 text-indigo-500" />
-                        <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-tighter">Auto-save Enabled</span>
+                        <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-tighter">Draft Synchronized</span>
                      </div>
                   </div>
-                  <textarea value={novelText} onChange={e => setNovelText(e.target.value)} placeholder="Type or paste your narrative here..." className="w-full flex-1 min-h-[50vh] p-6 sm:p-12 bg-white dark:bg-slate-900 rounded-3xl shadow-xl border-none font-serif text-lg sm:text-xl leading-relaxed resize-none scrollbar-hide focus:ring-0" />
+                  <textarea value={novelText} onChange={e => setNovelText(e.target.value)} placeholder="Type or paste your entire novel here..." className="w-full flex-1 min-h-[50vh] p-6 sm:p-12 bg-white dark:bg-slate-900 rounded-3xl shadow-xl border-none font-serif text-lg sm:text-xl leading-relaxed resize-none scrollbar-hide focus:ring-0" />
                 </div>
               ) : (
                 <div className="w-full min-h-[60vh] p-6 sm:p-12 bg-white dark:bg-slate-900 rounded-3xl shadow-xl font-serif text-lg sm:text-xl leading-relaxed text-slate-800 dark:text-slate-100 whitespace-pre-wrap">
-                  {processedData.length === 0 ? <div className="flex flex-col items-center justify-center py-40 opacity-10"><BookOpenIcon className="w-16 sm:w-24 h-16 sm:h-24 mb-4" /><p className="font-sans font-bold uppercase tracking-widest text-xs sm:text-base">Library is Empty</p></div> : 
+                  {processedData.length === 0 ? <div className="flex flex-col items-center justify-center py-40 opacity-10"><BookOpenIcon className="w-24 h-24 mb-4" /><p className="font-sans font-bold uppercase tracking-widest text-xs sm:text-base">Manuscript Empty</p></div> : 
                     processedData.map((s, si) => (
                       <span key={si} className={`inline-block rounded transition-all duration-700 ${si === activeIndices.activeSentenceIdx ? 'bg-indigo-600/5 dark:bg-indigo-400/10' : ''}`}>
                         {s.words.map((w, wi) => {
                           const active = si === activeIndices.activeSentenceIdx && wi === activeIndices.activeWordIdx;
-                          return <span key={wi} ref={active ? activeWordRef : null} className={`inline-block px-1 rounded transition-all duration-200 ${active ? 'bg-indigo-600 text-white shadow-[0_4px_20px_rgba(79,70,229,0.4)] scale-110' : 'opacity-100'}`}>{w.text}{' '}</span>;
+                          return <span key={wi} ref={active ? activeWordRef : null} className={`inline-block px-1 rounded transition-all duration-200 ${active ? 'bg-indigo-600 text-white shadow-indigo-600/30 shadow-xl scale-110 z-10 relative' : 'opacity-100'}`}>{w.text}{' '}</span>;
                         })}
                       </span>
                     ))
@@ -716,7 +710,7 @@ const App: React.FC = () => {
             </article>
 
             <div className="mt-auto pt-8 pb-4">
-              <AdUnit className="w-full border-indigo-500/10 dark:border-indigo-400/10" />
+              <AdUnit className="w-full" />
             </div>
           </div>
         </div>
@@ -724,20 +718,21 @@ const App: React.FC = () => {
         {/* CHATBOT */}
         {showChat && (
           <div className="fixed lg:absolute bottom-0 right-0 z-50 flex flex-col glass-panel shadow-2xl w-full lg:w-[420px] h-[90vh] lg:h-[650px] lg:bottom-10 lg:right-10 lg:rounded-[2.5rem] lg:border rounded-t-[2.5rem] animate-in slide-in-from-bottom duration-300">
-            <header className="p-6 lg:p-8 bg-indigo-600 text-white flex justify-between items-center shrink-0 lg:rounded-t-[2.5rem] rounded-t-[2.5rem]">
-              <div className="flex items-center gap-4"><ChatBubbleLeftRightIcon className="w-8 h-8" /><h3 className="font-bold">Literary Expert</h3></div>
-              <div className="flex gap-2"><button onClick={handleSaveChat} title="Save history" className="bg-white/10 p-2 rounded-2xl hover:bg-white/20 transition-colors"><ArrowDownTrayIcon className="w-5 h-5" /></button><button onClick={() => setShowChat(false)} className="bg-white/10 p-2 rounded-2xl hover:bg-white/20 transition-colors"><XMarkIcon className="w-5 h-5" /></button></div>
+            <header className="p-6 bg-indigo-600 text-white flex justify-between items-center shrink-0 lg:rounded-t-[2.5rem] rounded-t-[2.5rem]">
+              <div className="flex items-center gap-4"><ChatBubbleLeftRightIcon className="w-8 h-8" /><h3 className="font-bold">Literary Assistant</h3></div>
+              <div className="flex gap-2"><button onClick={handleSaveChat} title="Archive chat" className="bg-white/10 p-2 rounded-2xl hover:bg-white/20 transition-colors"><ArrowDownTrayIcon className="w-5 h-5" /></button><button onClick={() => setShowChat(false)} className="bg-white/10 p-2 rounded-2xl hover:bg-white/20 transition-colors"><XMarkIcon className="w-5 h-5" /></button></div>
             </header>
             <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-hide bg-white/40 dark:bg-slate-900/40 backdrop-blur-3xl">
+              {messages.length === 0 && <div className="text-center py-20 opacity-30 text-xs italic">Ask about character arcs, plot holes, or narrative flow...</div>}
               {messages.map(m => (
                 <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[90%] p-4 rounded-[1.5rem] text-sm leading-relaxed shadow-sm ${m.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-tl-none text-slate-700 dark:text-slate-200'}`}>{m.text}</div></div>
               ))}
               {isChatting && <div className="flex gap-2 items-center"><div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" /><div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.2s]" /><div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.4s]" /></div>}
             </div>
-            <footer className="p-4 lg:p-6 bg-white/95 dark:bg-slate-900/95 border-t dark:border-slate-800 backdrop-blur-md mb-safe shrink-0">
+            <footer className="p-4 bg-white/95 dark:bg-slate-900/95 border-t dark:border-slate-800 backdrop-blur-md mb-safe shrink-0">
               <div className="flex gap-2">
-                <input type="text" value={userInput} onChange={e => setUserInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSendMessage()} placeholder="Ask about plot..." className="flex-1 px-5 py-3 bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-2xl outline-none text-sm ring-indigo-500 focus:ring-2 transition-all" />
-                <button onClick={handleSendMessage} disabled={isChatting || !userInput.trim()} className="bg-indigo-600 text-white p-3 rounded-2xl shadow-lg disabled:opacity-30 hover:bg-indigo-700 active:scale-95 transition-all"><ArrowPathIcon className={`w-6 h-6 ${isChatting ? 'animate-spin' : ''}`} /></button>
+                <input type="text" value={userInput} onChange={e => setUserInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSendMessage()} placeholder="Ask anything about your text..." className="flex-1 px-5 py-3 bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-2xl outline-none text-sm ring-indigo-500 focus:ring-2" />
+                <button onClick={handleSendMessage} disabled={isChatting || !userInput.trim()} className="bg-indigo-600 text-white p-3 rounded-2xl shadow-lg hover:bg-indigo-700 active:scale-95 transition-all"><ArrowPathIcon className={`w-6 h-6 ${isChatting ? 'animate-spin' : ''}`} /></button>
               </div>
             </footer>
           </div>
