@@ -49,6 +49,31 @@ interface Toast {
   type: 'success' | 'error' | 'info';
 }
 
+/**
+ * AdSense Ad Component
+ */
+const AdUnit: React.FC<{ className?: string; slot?: string }> = ({ className = '', slot = '9677805119' }) => {
+  useEffect(() => {
+    try {
+      ((window as any).adsbygoogle = (window as any).adsbygoogle || []).push({});
+    } catch (e) {
+      console.warn("AdSense push failed:", e);
+    }
+  }, []);
+
+  return (
+    <div className={`ad-container bg-slate-100 dark:bg-slate-800/50 rounded-xl overflow-hidden p-2 text-center text-[10px] text-slate-400 font-bold uppercase tracking-widest border border-dashed border-slate-300 dark:border-slate-700 ${className}`}>
+      <span className="block mb-2">Advertisement</span>
+      <ins className="adsbygoogle"
+           style={{ display: 'block' }}
+           data-ad-client="ca-pub-5322028632012246"
+           data-ad-slot={slot}
+           data-ad-format="auto"
+           data-full-width-responsive="true"></ins>
+    </div>
+  );
+};
+
 const App: React.FC = () => {
   // --- Core States ---
   const [novelText, setNovelText] = useState<string>(() => localStorage.getItem('ivanchat_novel_text') || '');
@@ -81,19 +106,8 @@ const App: React.FC = () => {
   const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success') => {
     const id = Date.now().toString();
     setToasts(prev => [...prev, { id, message, type }]);
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4500);
   }, []);
-
-  // Favicon synchronization
-  useEffect(() => {
-    if (appIcon) {
-      const link = (document.querySelector("link[rel*='icon']") as HTMLLinkElement) || document.createElement('link');
-      link.type = 'image/png';
-      link.rel = 'icon';
-      link.href = appIcon;
-      if (!link.parentNode) document.head.appendChild(link);
-    }
-  }, [appIcon]);
 
   // --- Chapters ---
   const chapters = useMemo(() => {
@@ -262,17 +276,19 @@ const App: React.FC = () => {
         pausedTimeRef.current = (audioContextRef.current!.currentTime - startTimeRef.current) * audioSpeed;
       }
       setIsAudioPlaying(false);
+      addToast("Narration paused", "info");
     } else {
       if (!audioContextRef.current) audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       if (audioContextRef.current.state === 'suspended') audioContextRef.current.resume();
       const startAt = pausedTimeRef.current >= currentAudioBufferRef.current.duration ? 0 : pausedTimeRef.current;
       playBuffer(currentAudioBufferRef.current, startAt);
       setIsAudioPlaying(true);
+      addToast("Resuming narration", "success");
     }
   };
 
   const startSynthesis = async () => {
-    if (!activeChapter?.content.trim()) return addToast("Manuscript is empty", "info");
+    if (!activeChapter?.content.trim()) return addToast("Manuscript is empty!", "error");
     try {
       setIsGeneratingAudio(true);
       setGenProgress(0);
@@ -328,11 +344,11 @@ const App: React.FC = () => {
       audioContextRef.current = ctx;
       playBuffer(merged, 0);
       setIsAudioPlaying(true);
-      addToast("Audiobook narration generated!", "success");
+      addToast("Full chapter synthesized!", "success");
       setTimeout(() => setIsGeneratingAudio(false), 800);
     } catch (e) {
       console.error(e);
-      addToast("Synthesis failed. Check API connectivity.", "error");
+      addToast("Audio synthesis failed. Trying next API key...", "error");
       setIsGeneratingAudio(false);
     }
   };
@@ -358,7 +374,7 @@ const App: React.FC = () => {
 
   // --- Exports ---
   const handleExportWav = () => {
-    if (!currentAudioBufferRef.current) return addToast("No audio to export", "info");
+    if (!currentAudioBufferRef.current) return addToast("No audio to export", "error");
     const blob = audioBufferToWav(currentAudioBufferRef.current);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -366,12 +382,13 @@ const App: React.FC = () => {
     a.download = `Ivanchat_${(activeChapter?.title || 'Chapter').replace(/\s+/g, '_')}.wav`;
     a.click();
     URL.revokeObjectURL(url);
-    addToast("WAV file downloaded", "success");
+    addToast("WAV export started", "success");
   };
 
   const handleExportMp4 = async () => {
-    if (!currentAudioBufferRef.current) return addToast("No narration to export", "info");
+    if (!currentAudioBufferRef.current) return addToast("No narration found", "error");
     setIsRenderingVideo(true);
+    addToast("Starting high-fidelity video render...", "info");
     try {
       const blob = await audioBufferToMp4(currentAudioBufferRef.current, activeChapter?.title || 'Untitled', appIcon);
       const url = URL.createObjectURL(blob);
@@ -380,37 +397,42 @@ const App: React.FC = () => {
       a.download = `Ivanchat_${(activeChapter?.title || 'Narrative').replace(/\s+/g, '_')}.webm`;
       a.click();
       URL.revokeObjectURL(url);
-      addToast("Video export complete", "success");
+      addToast("Video downloaded successfully", "success");
     } catch (e) {
-      addToast("Video rendering failed", "error");
+      addToast("Video render error", "error");
     } finally {
       setIsRenderingVideo(false);
     }
   };
 
   const handleSavePreset = () => {
-    if (!presetNameInput.trim()) return;
+    if (!presetNameInput.trim()) return addToast("Provide a preset name", "info");
     const p: VoicePreset = { id: Date.now().toString(), name: presetNameInput.trim(), tones: [...selectedTones], gender, pitch, includeBreaths, speed: audioSpeed };
     setPresets(prev => [...prev, p]);
     setPresetNameInput('');
-    addToast("Voice preset saved");
+    addToast("Narrative preset saved!");
   };
 
   const handleSaveChat = () => {
-    if (messages.length === 0) return;
+    if (messages.length === 0) return addToast("No conversation to save", "info");
     const s: ChatSession = { id: Date.now().toString(), name: `Session ${chatSessions.length + 1}`, messages: [...messages], lastUpdated: new Date() };
     setChatSessions(prev => [s, ...prev]);
-    addToast("Chat session archived");
+    addToast("Literary discussion archived");
   };
 
   const handleExtractCharacters = async () => {
-    if (!novelText.trim()) return addToast("Provide text first", "info");
+    if (!novelText.trim()) return addToast("Provide manuscript text first", "info");
     setIsExtractingCharacters(true);
+    addToast("Analyzing characters...", "info");
     try {
       const result = await geminiService.extractCharacters(novelText);
       setCharacters(result);
-      addToast("Character bios extracted", "success");
-    } catch (e) { addToast("Extraction failed", "error"); } finally { setIsExtractingCharacters(false); }
+      addToast(`${result.length} characters identified`, "success");
+    } catch (e) { 
+      addToast("Character analysis failed", "error"); 
+    } finally { 
+      setIsExtractingCharacters(false); 
+    }
   };
 
   const handleSendMessage = async () => {
@@ -423,14 +445,18 @@ const App: React.FC = () => {
       const hist = messages.map(m => ({ role: m.role, parts: [{ text: m.text }] }));
       const response = await geminiService.chat(userInput, novelText, characters, hist);
       setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: response, timestamp: new Date() }]);
-    } catch (e) { addToast("Chat engine error", "error"); } finally { setIsChatting(false); }
+    } catch (e) { 
+      addToast("Chat bot is currently busy", "error"); 
+    } finally { 
+      setIsChatting(false); 
+    }
   };
 
   return (
     <div className="flex h-screen-safe bg-slate-50 dark:bg-slate-950 overflow-hidden text-slate-900 dark:text-slate-100 font-sans transition-colors duration-500 relative">
       
       {/* TOAST SYSTEM */}
-      <div className="fixed top-6 right-6 z-[200] flex flex-col gap-3 pointer-events-none">
+      <div className="fixed top-6 right-6 z-[200] flex flex-col gap-3 pointer-events-none w-full max-w-sm px-4">
         {toasts.map(t => (
           <div key={t.id} className={`
             pointer-events-auto flex items-center gap-3 px-5 py-4 rounded-2xl shadow-2xl border backdrop-blur-xl animate-in slide-in-from-right duration-300
@@ -441,7 +467,7 @@ const App: React.FC = () => {
             {t.type === 'success' && <CheckCircleIcon className="w-6 h-6 shrink-0" />}
             {t.type === 'error' && <ExclamationCircleIcon className="w-6 h-6 shrink-0" />}
             {t.type === 'info' && <InformationCircleIcon className="w-6 h-6 shrink-0" />}
-            <span className="text-sm font-semibold pr-4">{t.message}</span>
+            <span className="text-sm font-semibold flex-1">{t.message}</span>
             <button onClick={() => setToasts(prev => prev.filter(x => x.id !== t.id))} className="opacity-50 hover:opacity-100"><XMarkIcon className="w-4 h-4" /></button>
           </div>
         ))}
@@ -454,7 +480,7 @@ const App: React.FC = () => {
              <VideoCameraIcon className="w-10 h-10 text-white" />
            </div>
            <h2 className="text-2xl font-bold mb-2">Rendering WebM Video...</h2>
-           <p className="text-slate-400 text-center max-w-sm">Merging voice with static visuals. High-fidelity output in progress.</p>
+           <p className="text-slate-400 text-center max-w-sm">Generating immersive visual background. This process is highly intensive and may take up to a minute.</p>
         </div>
       )}
 
@@ -480,6 +506,8 @@ const App: React.FC = () => {
         </div>
 
         <div className="p-6 flex-1 overflow-y-auto space-y-8 scrollbar-hide">
+          <AdUnit slot="9677805119" className="mb-4" />
+          
           <section>
             <div className="flex items-center gap-2 mb-4 text-slate-400 font-bold uppercase text-[10px] tracking-widest"><EyeIcon className="w-4 h-4" /> Workspace Mode</div>
             <div className="flex p-1 bg-slate-100 dark:bg-slate-800 rounded-xl">
@@ -503,7 +531,7 @@ const App: React.FC = () => {
           <section>
             <div className="flex items-center justify-between mb-4">
               <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2"><UserGroupIcon className="w-4 h-4" /> Characters</span>
-              <button onClick={handleExtractCharacters} disabled={isExtractingCharacters} className="text-indigo-600 disabled:opacity-30"><SparklesIcon className={`w-4 h-4 ${isExtractingCharacters ? 'animate-pulse' : ''}`} /></button>
+              <button onClick={handleExtractCharacters} disabled={isExtractingCharacters} title="Identify characters" className="text-indigo-600 disabled:opacity-30"><SparklesIcon className={`w-4 h-4 ${isExtractingCharacters ? 'animate-pulse' : ''}`} /></button>
             </div>
             <div className="space-y-2">
               {characters.length === 0 ? <div className="text-[10px] text-center p-4 border border-dashed rounded-lg opacity-40 italic">Scan text to find characters...</div> : characters.slice(0, 4).map((c, i) => (
@@ -541,7 +569,7 @@ const App: React.FC = () => {
                   <input type="range" min="-30" max="30" value={pitch} onChange={e => setPitch(parseInt(e.target.value))} className="w-full h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
                </div>
                <div className="flex items-center justify-between text-[10px] font-bold uppercase">
-                  <span>Audible Breaths</span>
+                  <span>Natural Breaths</span>
                   <button onClick={() => setIncludeBreaths(!includeBreaths)} className={`w-10 h-5 rounded-full relative transition-colors duration-200 ${includeBreaths ? 'bg-indigo-600' : 'bg-slate-300 dark:bg-slate-700'}`}><div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform duration-200 ${includeBreaths ? 'translate-x-5' : ''}`} /></button>
                </div>
             </div>
@@ -584,7 +612,7 @@ const App: React.FC = () => {
                 <div className="sticky top-0 z-20 py-4 bg-slate-50/90 dark:bg-slate-950/90 backdrop-blur-md mb-8">
                    <div className="flex flex-col sm:flex-row items-center gap-4">
                       <div className="flex items-center gap-4 w-full sm:w-auto">
-                        <button onClick={togglePlayback} className="p-4 bg-indigo-600 text-white rounded-full shadow-lg shrink-0">
+                        <button onClick={togglePlayback} className="p-4 bg-indigo-600 text-white rounded-full shadow-lg shrink-0 transition-transform active:scale-90">
                           {isAudioPlaying ? <PauseIcon className="w-6 h-6" /> : <PlayIcon className="w-6 h-6" />}
                         </button>
                         <div className="sm:hidden flex-1 space-y-1">
@@ -604,8 +632,8 @@ const App: React.FC = () => {
                             </select>
                          </div>
                          <div className="flex gap-2">
-                            <button onClick={handleExportWav} title="WAV" className="p-3 bg-slate-100 dark:bg-slate-800 rounded-xl"><ArrowDownOnSquareIcon className="w-5 h-5" /></button>
-                            <button onClick={handleExportMp4} title="Video" className="p-3 bg-slate-100 dark:bg-slate-800 rounded-xl"><VideoCameraIcon className="w-5 h-5" /></button>
+                            <button onClick={handleExportWav} title="WAV" className="p-3 bg-slate-100 dark:bg-slate-800 rounded-xl hover:text-indigo-600 transition-colors"><ArrowDownOnSquareIcon className="w-5 h-5" /></button>
+                            <button onClick={handleExportMp4} title="Video" className="p-3 bg-slate-100 dark:bg-slate-800 rounded-xl hover:text-indigo-600 transition-colors"><VideoCameraIcon className="w-5 h-5" /></button>
                          </div>
                       </div>
                    </div>
@@ -613,7 +641,10 @@ const App: React.FC = () => {
               )}
 
               {viewMode === 'editor' ? (
-                <textarea value={novelText} onChange={e => setNovelText(e.target.value)} placeholder="Type or paste your narrative here..." className="w-full h-[60vh] sm:h-[75vh] p-6 sm:p-12 bg-white dark:bg-slate-900 rounded-3xl shadow-xl border-none font-serif text-lg sm:text-xl leading-relaxed resize-none scrollbar-hide" />
+                <div className="space-y-6">
+                  <textarea value={novelText} onChange={e => setNovelText(e.target.value)} placeholder="Type or paste your narrative here..." className="w-full h-[60vh] sm:h-[75vh] p-6 sm:p-12 bg-white dark:bg-slate-900 rounded-3xl shadow-xl border-none font-serif text-lg sm:text-xl leading-relaxed resize-none scrollbar-hide" />
+                  <AdUnit slot="9677805119" className="max-w-xl mx-auto" />
+                </div>
               ) : (
                 <div className="w-full min-h-[60vh] sm:min-h-[75vh] p-6 sm:p-12 bg-white dark:bg-slate-900 rounded-3xl shadow-xl font-serif text-lg sm:text-xl leading-relaxed text-slate-800 dark:text-slate-100 whitespace-pre-wrap">
                   {processedData.length === 0 ? <div className="flex flex-col items-center justify-center py-40 opacity-10"><BookOpenIcon className="w-16 sm:w-24 h-16 sm:h-24 mb-4" /><p className="font-sans font-bold uppercase tracking-widest text-xs sm:text-base">Library is Empty</p></div> : 
@@ -626,6 +657,9 @@ const App: React.FC = () => {
                       </span>
                     ))
                   }
+                  <div className="mt-20">
+                     <AdUnit slot="9677805119" />
+                  </div>
                 </div>
               )}
             </article>
@@ -634,10 +668,10 @@ const App: React.FC = () => {
 
         {/* CHATBOT */}
         {showChat && (
-          <div className="fixed lg:absolute bottom-0 right-0 z-50 flex flex-col glass-panel shadow-2xl w-full lg:w-[420px] h-[90vh] lg:h-[650px] lg:bottom-10 lg:right-10 lg:rounded-[2.5rem] lg:border rounded-t-[2.5rem]">
+          <div className="fixed lg:absolute bottom-0 right-0 z-50 flex flex-col glass-panel shadow-2xl w-full lg:w-[420px] h-[90vh] lg:h-[650px] lg:bottom-10 lg:right-10 lg:rounded-[2.5rem] lg:border rounded-t-[2.5rem] animate-in slide-in-from-bottom duration-300">
             <header className="p-6 lg:p-8 bg-indigo-600 text-white flex justify-between items-center shrink-0 lg:rounded-t-[2.5rem] rounded-t-[2.5rem]">
               <div className="flex items-center gap-4"><ChatBubbleLeftRightIcon className="w-8 h-8" /><h3 className="font-bold">Literary Expert</h3></div>
-              <div className="flex gap-2"><button onClick={handleSaveChat} className="bg-white/10 p-2 rounded-2xl"><ArrowDownTrayIcon className="w-5 h-5" /></button><button onClick={() => setShowChat(false)} className="bg-white/10 p-2 rounded-2xl"><XMarkIcon className="w-5 h-5" /></button></div>
+              <div className="flex gap-2"><button onClick={handleSaveChat} title="Save history" className="bg-white/10 p-2 rounded-2xl hover:bg-white/20 transition-colors"><ArrowDownTrayIcon className="w-5 h-5" /></button><button onClick={() => setShowChat(false)} className="bg-white/10 p-2 rounded-2xl hover:bg-white/20 transition-colors"><XMarkIcon className="w-5 h-5" /></button></div>
             </header>
             <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-hide bg-white/40 dark:bg-slate-900/40 backdrop-blur-3xl">
               {messages.map(m => (
@@ -647,8 +681,8 @@ const App: React.FC = () => {
             </div>
             <footer className="p-4 lg:p-6 bg-white/95 dark:bg-slate-900/95 border-t dark:border-slate-800 backdrop-blur-md mb-safe shrink-0">
               <div className="flex gap-2">
-                <input type="text" value={userInput} onChange={e => setUserInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSendMessage()} placeholder="Ask about plot or characters..." className="flex-1 px-5 py-3 bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-2xl outline-none text-sm" />
-                <button onClick={handleSendMessage} disabled={isChatting || !userInput.trim()} className="bg-indigo-600 text-white p-3 rounded-2xl shadow-lg disabled:opacity-30"><ArrowPathIcon className={`w-6 h-6 ${isChatting ? 'animate-spin' : ''}`} /></button>
+                <input type="text" value={userInput} onChange={e => setUserInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSendMessage()} placeholder="Ask about plot or characters..." className="flex-1 px-5 py-3 bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-2xl outline-none text-sm ring-indigo-500 focus:ring-2 transition-all" />
+                <button onClick={handleSendMessage} disabled={isChatting || !userInput.trim()} className="bg-indigo-600 text-white p-3 rounded-2xl shadow-lg disabled:opacity-30 hover:bg-indigo-700 active:scale-95 transition-all"><ArrowPathIcon className={`w-6 h-6 ${isChatting ? 'animate-spin' : ''}`} /></button>
               </div>
             </footer>
           </div>

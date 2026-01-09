@@ -2,6 +2,7 @@ import { GoogleGenAI, Modality, Type } from "@google/genai";
 import { ReadingTone, VoiceGender, CharacterBio, SceneMetadata } from "../types.ts";
 
 // Support for multiple keys with rotation/fallback logic
+// We attempt to pull from various standard Netlify/Environment variable names
 const keys = [
   process.env.API_KEY,
   (process.env as any).GEMINI_API_KEY,
@@ -12,17 +13,18 @@ const keys = [
 let currentKeyIndex = 0;
 
 /**
- * Returns a new GoogleGenAI instance using the current active key.
+ * Returns a new GoogleGenAI instance using the current active key from the rotation.
  */
 function getAIClient() {
-  const apiKey = keys.length > 0 ? keys[currentKeyIndex] : process.env.API_KEY!;
+  const apiKey = keys.length > 0 ? keys[currentKeyIndex] : (process.env.API_KEY || '');
   return new GoogleGenAI({ apiKey });
 }
 
 /**
- * Executes an AI operation with automatic key rotation on failure.
+ * Executes an AI operation with automatic key rotation and retry on failure.
+ * This ensures the app stays running even if one key hits a quota or rate limit.
  */
-async function withFallback<T>(operation: (ai: ReturnType<typeof getAIClient>) => Promise<T>): Promise<T> {
+async function withFallback<T>(operation: (ai: any) => Promise<T>): Promise<T> {
   let lastError;
   const attempts = Math.max(1, keys.length);
 
@@ -31,15 +33,18 @@ async function withFallback<T>(operation: (ai: ReturnType<typeof getAIClient>) =
       const ai = getAIClient();
       return await operation(ai);
     } catch (e: any) {
-      console.warn(`Gemini API Error with key ${currentKeyIndex}. Attempting rotation.`, e);
+      console.warn(`API attempt ${i + 1} failed with key index ${currentKeyIndex}. Rotating keys...`, e);
       lastError = e;
-      // Rotate to next key if we have multiple
+      
+      // Rotate to next key if available
       if (keys.length > 1) {
         currentKeyIndex = (currentKeyIndex + 1) % keys.length;
       } else {
-        // If only one key, don't loop endlessly
-        throw e;
+        throw e; // No other keys to try
       }
+      
+      // Short delay before retry to avoid rapid-fire failures
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
   throw lastError;
@@ -53,8 +58,8 @@ export const geminiService = {
     return withFallback(async (ai) => {
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: `Analyze this scene for a high-end audiobook production. Identify the dominant mood, the ideal narration pacing, present characters, and key phrases that require specific emphasis.
-        Return the results in JSON format.
+        contents: `Analyze this scene for audiobook production. Identify mood, pacing, characters, and key emphasis phrases.
+        Return results in JSON format.
         
         Text sample: "${text.substring(0, 1500)}"`,
         config: {
@@ -72,7 +77,7 @@ export const geminiService = {
         }
       });
 
-      if (!response.text) throw new Error("Empty response from analysis model.");
+      if (!response.text) throw new Error("Empty analysis response.");
       return JSON.parse(response.text.trim());
     });
   },
@@ -85,25 +90,11 @@ export const geminiService = {
       const toneList = tones.length > 0 ? tones.map(t => t.toLowerCase()) : ['neutral'];
       const toneDescription = toneList.join(' + ');
         
-      const prompt = `Act as a world-class voice actor and professional audiobook narrator. Read the following text using a ${gender.toLowerCase()} voice. 
-
-      TONE SYNTHESIS ALGORITHM (Emotional Core Blending):
-      Target Narrative Profile: ${toneDescription}. 
-
-      INSTRUCTIONS:
-      1. Identify Emotional Resonance: Create a performance that intersects the chosen tones.
-      2. Prioritize Subtext: Use the tones to color vocal micro-inflections.
-      3. Fluid Transitions: Ensure pacing is governed by narrative flow.
-
-      ${metadata ? `SCENE CONTEXT:
-      - Mood: ${metadata.mood}
-      - Pacing: ${metadata.pacing}
-      - Characters: ${metadata.keyCharacters.join(', ')}` : ''}
-
-      VOICE MODULATION:
-      - Pitch Shift: ${pitch}%
-      - Natural Respiration: ${breaths ? 'Include audible breaths.' : 'Clean studio delivery.'}
-
+      const prompt = `Act as a world-class voice actor. Narrate the following text using a ${gender.toLowerCase()} voice. 
+      Emotional blend: ${toneDescription}. 
+      ${metadata ? `Context: Mood is ${metadata.mood}, pacing is ${metadata.pacing}.` : ''}
+      Modulation: Pitch shift ${pitch}%, breaths ${breaths ? 'included' : 'excluded'}.
+      
       TEXT: "${text}"`;
       
       const voiceName = gender === VoiceGender.FEMALE ? 'Kore' : 'Fenrir';
@@ -135,7 +126,7 @@ export const geminiService = {
     return withFallback(async (ai) => {
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: `Identify the significant characters and generate bios. Sample: ${contextText.substring(0, 15000)}...`,
+        contents: `Identify characters and generate bios. Sample: ${contextText.substring(0, 10000)}...`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -166,19 +157,19 @@ export const geminiService = {
   async chat(message: string, contextText: string, characters: CharacterBio[], history: { role: 'user' | 'model', parts: { text: string }[] }[]): Promise<string> {
     return withFallback(async (ai) => {
       const characterContext = characters.length > 0 
-        ? "CHARACTER DOSSIER:\n" + characters.map(c => `- ${c.name} (${c.role}): ${c.description}`).join("\n")
+        ? "CHARACTERS:\n" + characters.map(c => `- ${c.name} (${c.role}): ${c.description}`).join("\n")
         : "";
       
       const chatInstance = ai.chats.create({
         model: 'gemini-3-pro-preview',
         config: {
-          systemInstruction: `You are an expert literary analysis chatbot. ${characterContext}\n\nNOVEL CONTEXT: ${contextText.substring(0, 8000)}...`,
+          systemInstruction: `You are an expert literary analysis chatbot. ${characterContext}\n\nNOVEL CONTEXT: ${contextText.substring(0, 10000)}...`,
         },
         history: history
       });
 
       const response = await chatInstance.sendMessage({ message });
-      return response.text || "I'm sorry, I couldn't generate a response.";
+      return response.text || "Could not generate a literary response.";
     });
   },
 
@@ -197,7 +188,7 @@ export const geminiService = {
                 data: base64Audio,
               },
             },
-            { text: "Transcribe the audio command accurately. Only return the transcribed text." }
+            { text: "Transcribe accurately. Only return text." }
           ]
         }
       });
