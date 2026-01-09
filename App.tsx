@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { ReadingTone, VoiceGender, ChatMessage, CharacterBio, VoicePreset, ChatSession, SceneMetadata, Chapter } from './types.ts';
 import { geminiService } from './services/geminiService.ts';
@@ -32,7 +33,8 @@ import {
   VideoCameraIcon,
   CheckCircleIcon,
   ExclamationCircleIcon,
-  InformationCircleIcon
+  InformationCircleIcon,
+  CloudArrowUpIcon
 } from '@heroicons/react/24/outline';
 
 interface AudioChunkMetadata {
@@ -49,9 +51,6 @@ interface Toast {
   type: 'success' | 'error' | 'info';
 }
 
-/**
- * AdSense Ad Component
- */
 const AdUnit: React.FC<{ className?: string; slot?: string }> = ({ className = '', slot = '9677805119' }) => {
   useEffect(() => {
     try {
@@ -62,21 +61,55 @@ const AdUnit: React.FC<{ className?: string; slot?: string }> = ({ className = '
   }, []);
 
   return (
-    <div className={`ad-container bg-slate-100 dark:bg-slate-800/50 rounded-xl overflow-hidden p-2 text-center text-[10px] text-slate-400 font-bold uppercase tracking-widest border border-dashed border-slate-300 dark:border-slate-700 ${className}`}>
-      <span className="block mb-2">Advertisement</span>
+    <div className={`ad-container bg-slate-100/30 dark:bg-slate-800/20 rounded-2xl overflow-hidden p-2 text-center text-[8px] text-slate-400 font-bold uppercase tracking-widest border border-dashed border-slate-300/30 dark:border-slate-700/30 transition-all ${className}`}>
+      <span className="block mb-1 opacity-30">ADVERTISEMENT</span>
       <ins className="adsbygoogle"
            style={{ display: 'block' }}
            data-ad-client="ca-pub-5322028632012246"
            data-ad-slot={slot}
-           data-ad-format="auto"
+           data-ad-format="horizontal"
            data-full-width-responsive="true"></ins>
     </div>
   );
 };
 
 const App: React.FC = () => {
+  // --- Logo Logic ---
+  const [appLogo, setAppLogo] = useState<string>(() => localStorage.getItem('ivanchat_app_logo') || '');
+  const [isGeneratingLogo, setIsGeneratingLogo] = useState(false);
+
+  useEffect(() => {
+    const initLogo = async () => {
+      if (!appLogo) {
+        setIsGeneratingLogo(true);
+        try {
+          const generated = await geminiService.generateAppLogo();
+          setAppLogo(generated);
+          localStorage.setItem('ivanchat_app_logo', generated);
+          
+          let link = document.querySelector("link[rel*='icon']") as HTMLLinkElement;
+          if (!link) {
+            link = document.createElement('link');
+            link.rel = 'shortcut icon';
+            document.getElementsByTagName('head')[0].appendChild(link);
+          }
+          link.href = generated;
+        } catch (e) {
+          console.error("Logo generation failed:", e);
+        } finally {
+          setIsGeneratingLogo(false);
+        }
+      } else {
+        let link = document.querySelector("link[rel*='icon']") as HTMLLinkElement;
+        if (link) link.href = appLogo;
+      }
+    };
+    initLogo();
+  }, [appLogo]);
+
   // --- Core States ---
   const [novelText, setNovelText] = useState<string>(() => localStorage.getItem('ivanchat_novel_text') || '');
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'drafting'>('saved');
   const [characters, setCharacters] = useState<CharacterBio[]>(() => {
     const stored = localStorage.getItem('ivanchat_characters');
     return stored ? JSON.parse(stored) : [];
@@ -88,7 +121,6 @@ const App: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [userInput, setUserInput] = useState('');
   const [isChatting, setIsChatting] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isRenderingVideo, setIsRenderingVideo] = useState(false);
   
@@ -98,10 +130,6 @@ const App: React.FC = () => {
   });
   const [viewMode, setViewMode] = useState<'editor' | 'reader'>('editor');
   
-  // --- Branding ---
-  const [appIcon, setAppIcon] = useState<string | null>(() => localStorage.getItem('ivanchat_app_icon'));
-  
-  // --- Toast System ---
   const [toasts, setToasts] = useState<Toast[]>([]);
   const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success') => {
     const id = Date.now().toString();
@@ -109,7 +137,6 @@ const App: React.FC = () => {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4500);
   }, []);
 
-  // --- Chapters ---
   const chapters = useMemo(() => {
     const textToParse = (novelText || '').trim();
     if (!textToParse) return [{ id: 'full', title: 'Full Manuscript', content: '', startIndex: 0 }];
@@ -133,10 +160,37 @@ const App: React.FC = () => {
   const [selectedChapterId, setSelectedChapterId] = useState<string>('full');
   const activeChapter = useMemo(() => chapters.find(c => c.id === selectedChapterId) || chapters[0], [chapters, selectedChapterId]);
 
-  // --- Archives & Presets ---
   const [chatSessions, setChatSessions] = useState<ChatSession[]>(() => JSON.parse(localStorage.getItem('ivanchat_chat_sessions') || '[]'));
   const [presets, setPresets] = useState<VoicePreset[]>(() => JSON.parse(localStorage.getItem('ivanchat_presets') || '[]'));
-  const [presetNameInput, setPresetNameInput] = useState('');
+
+  // --- Auto-Save and Persistence Engine ---
+  const performSave = useCallback(() => {
+    setSaveStatus('saving');
+    localStorage.setItem('ivanchat_novel_text', novelText);
+    localStorage.setItem('ivanchat_characters', JSON.stringify(characters));
+    localStorage.setItem('ivanchat_presets', JSON.stringify(presets));
+    localStorage.setItem('ivanchat_chat_sessions', JSON.stringify(chatSessions));
+    localStorage.setItem('ivanchat_theme', isDarkMode ? 'dark' : 'light');
+    setTimeout(() => setSaveStatus('saved'), 600);
+  }, [novelText, characters, presets, chatSessions, isDarkMode]);
+
+  // Save on changes with debounce feedback
+  useEffect(() => {
+    if (saveStatus === 'saved') setSaveStatus('drafting');
+    const timer = setTimeout(performSave, 1500);
+    if (isDarkMode) document.documentElement.classList.add('dark');
+    else document.documentElement.classList.remove('dark');
+    return () => clearTimeout(timer);
+  }, [novelText, characters, presets, chatSessions, isDarkMode, performSave]);
+
+  // Background fail-safe save every 2 minutes
+  useEffect(() => {
+    const interval = setInterval(() => {
+      performSave();
+      console.log("Background persistent sync complete.");
+    }, 120000);
+    return () => clearInterval(interval);
+  }, [performSave]);
 
   // --- Audio Engine ---
   const [audioSpeed, setAudioSpeed] = useState(1.0);
@@ -157,17 +211,6 @@ const App: React.FC = () => {
   const progressRequestRef = useRef<number | null>(null);
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
-
-  // --- Local Persistence ---
-  useEffect(() => {
-    localStorage.setItem('ivanchat_novel_text', novelText);
-    localStorage.setItem('ivanchat_characters', JSON.stringify(characters));
-    localStorage.setItem('ivanchat_presets', JSON.stringify(presets));
-    localStorage.setItem('ivanchat_chat_sessions', JSON.stringify(chatSessions));
-    localStorage.setItem('ivanchat_theme', isDarkMode ? 'dark' : 'light');
-    if (isDarkMode) document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  }, [novelText, characters, presets, chatSessions, isDarkMode]);
 
   useEffect(() => {
     const loadCachedAudio = async () => {
@@ -193,7 +236,6 @@ const App: React.FC = () => {
 
   const [showChat, setShowChat] = useState(false);
 
-  // --- Text & Sync Logic ---
   const processedData = useMemo(() => {
     if (!activeChapter) return [];
     const text = activeChapter.content;
@@ -254,7 +296,6 @@ const App: React.FC = () => {
     }
   }, [activeIndices.activeWordIdx, viewMode]);
 
-  // --- Audio Handlers ---
   const playBuffer = (buffer: AudioBuffer, offset: number) => {
     if (!audioContextRef.current) return;
     if (sourceNodeRef.current) sourceNodeRef.current.stop();
@@ -348,7 +389,7 @@ const App: React.FC = () => {
       setTimeout(() => setIsGeneratingAudio(false), 800);
     } catch (e) {
       console.error(e);
-      addToast("Audio synthesis failed. Trying next API key...", "error");
+      addToast("Audio synthesis failed. Retrying may fix transient issues.", "error");
       setIsGeneratingAudio(false);
     }
   };
@@ -372,7 +413,6 @@ const App: React.FC = () => {
     return () => { if (progressRequestRef.current) cancelAnimationFrame(progressRequestRef.current); };
   }, [isAudioPlaying, updateProgress]);
 
-  // --- Exports ---
   const handleExportWav = () => {
     if (!currentAudioBufferRef.current) return addToast("No audio to export", "error");
     const blob = audioBufferToWav(currentAudioBufferRef.current);
@@ -390,7 +430,7 @@ const App: React.FC = () => {
     setIsRenderingVideo(true);
     addToast("Starting high-fidelity video render...", "info");
     try {
-      const blob = await audioBufferToMp4(currentAudioBufferRef.current, activeChapter?.title || 'Untitled', appIcon);
+      const blob = await audioBufferToMp4(currentAudioBufferRef.current, activeChapter?.title || 'Untitled', appLogo);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -403,14 +443,6 @@ const App: React.FC = () => {
     } finally {
       setIsRenderingVideo(false);
     }
-  };
-
-  const handleSavePreset = () => {
-    if (!presetNameInput.trim()) return addToast("Provide a preset name", "info");
-    const p: VoicePreset = { id: Date.now().toString(), name: presetNameInput.trim(), tones: [...selectedTones], gender, pitch, includeBreaths, speed: audioSpeed };
-    setPresets(prev => [...prev, p]);
-    setPresetNameInput('');
-    addToast("Narrative preset saved!");
   };
 
   const handleSaveChat = () => {
@@ -446,7 +478,7 @@ const App: React.FC = () => {
       const response = await geminiService.chat(userInput, novelText, characters, hist);
       setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: response, timestamp: new Date() }]);
     } catch (e) { 
-      addToast("Chat bot is currently busy", "error"); 
+      addToast("Literary AI is currently disconnected", "error"); 
     } finally { 
       setIsChatting(false); 
     }
@@ -480,14 +512,14 @@ const App: React.FC = () => {
              <VideoCameraIcon className="w-10 h-10 text-white" />
            </div>
            <h2 className="text-2xl font-bold mb-2">Rendering WebM Video...</h2>
-           <p className="text-slate-400 text-center max-w-sm">Generating immersive visual background. This process is highly intensive and may take up to a minute.</p>
+           <p className="text-slate-400 text-center max-w-sm">Generating immersive visual background with fixed branding. High-fidelity output in progress.</p>
         </div>
       )}
 
       {/* MOBILE OVERLAY */}
       {isSidebarOpen && <div className="fixed inset-0 bg-black/50 z-30 lg:hidden transition-opacity duration-300" onClick={() => setIsSidebarOpen(false)} />}
 
-      {/* SIDEBAR */}
+      {/* SIDEBAR (MENU BAR) */}
       <aside className={`
         fixed inset-y-0 left-0 z-40 w-[280px] sm:w-[320px] bg-white dark:bg-slate-900 border-r dark:border-slate-800 shadow-2xl transition-transform duration-300 transform 
         lg:translate-x-0 lg:static lg:block lg:shadow-none
@@ -495,8 +527,8 @@ const App: React.FC = () => {
        flex flex-col shrink-0`}>
         <div className="p-6 border-b dark:border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center">
-              <SparklesIcon className="w-6 h-6 text-white" />
+            <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center overflow-hidden shadow-indigo-600/10 shadow-lg relative">
+               {isGeneratingLogo ? <SparklesIcon className="w-6 h-6 text-white animate-pulse" /> : <img src={appLogo} alt="Logo" className="w-full h-full object-cover" />}
             </div>
             <h1 className="text-xl font-bold tracking-tight">Ivanchat</h1>
           </div>
@@ -506,8 +538,6 @@ const App: React.FC = () => {
         </div>
 
         <div className="p-6 flex-1 overflow-y-auto space-y-8 scrollbar-hide">
-          <AdUnit slot="9677805119" className="mb-4" />
-          
           <section>
             <div className="flex items-center gap-2 mb-4 text-slate-400 font-bold uppercase text-[10px] tracking-widest"><EyeIcon className="w-4 h-4" /> Workspace Mode</div>
             <div className="flex p-1 bg-slate-100 dark:bg-slate-800 rounded-xl">
@@ -590,16 +620,35 @@ const App: React.FC = () => {
         {/* MOBILE HEADER */}
         <header className="lg:hidden p-4 border-b dark:border-slate-800 bg-white dark:bg-slate-950 flex items-center justify-between z-20 shrink-0">
           <button onClick={() => setIsSidebarOpen(true)} className="p-2 rounded-xl bg-slate-100 dark:bg-slate-800"><Bars3Icon className="w-6 h-6" /></button>
-          <div className="flex items-center gap-2"><div className="w-6 h-6 bg-indigo-600 rounded-lg" /><span className="font-bold text-sm">Ivanchat</span></div>
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 bg-indigo-600 rounded-lg overflow-hidden shadow-md">
+              <img src={appLogo} alt="Logo" className="w-full h-full object-cover" />
+            </div>
+            <span className="font-bold text-sm">Ivanchat</span>
+          </div>
           <button onClick={() => setShowChat(!showChat)} className={`p-2 rounded-xl transition-colors ${showChat ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800'}`}><ChatBubbleLeftRightIcon className="w-6 h-6" /></button>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-4 sm:p-8 lg:p-12 scrollbar-hide" ref={scrollContainerRef}>
-          <div className="max-w-4xl mx-auto space-y-6 sm:space-y-8">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-8 lg:p-12 scrollbar-hide flex flex-col" ref={scrollContainerRef}>
+          <div className="max-w-4xl mx-auto space-y-6 sm:space-y-8 flex-1 w-full flex flex-col">
             <header className="hidden lg:flex justify-between items-center border-b dark:border-slate-800 pb-6">
-              <div>
-                <h2 className="text-3xl font-serif font-bold text-slate-800 dark:text-slate-100">{viewMode === 'editor' ? 'Manuscript Editor' : 'Immersive Reader'}</h2>
-                <p className="text-xs font-bold text-slate-400 mt-1 uppercase tracking-widest">{activeChapter?.title || 'No chapter selected'}</p>
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-2xl overflow-hidden shadow-lg border border-slate-200 dark:border-slate-700 bg-white">
+                  <img src={appLogo} alt="Logo" className="w-full h-full object-cover" />
+                </div>
+                <div>
+                  <h2 className="text-3xl font-serif font-bold text-slate-800 dark:text-slate-100">{viewMode === 'editor' ? 'Manuscript Editor' : 'Immersive Reader'}</h2>
+                  <div className="flex items-center gap-3 mt-1">
+                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{activeChapter?.title || 'No chapter selected'}</p>
+                    <div className="w-px h-3 bg-slate-300 dark:bg-slate-700" />
+                    <div className="flex items-center gap-1.5 transition-all duration-300">
+                      <div className={`w-1.5 h-1.5 rounded-full ${saveStatus === 'saved' ? 'bg-emerald-500' : saveStatus === 'saving' ? 'bg-indigo-500 animate-pulse' : 'bg-amber-400'}`} />
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        {saveStatus === 'saved' ? 'All changes saved' : saveStatus === 'saving' ? 'Saving progress...' : 'Drafting...'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
               <div className="flex items-center gap-6">
                 <div className="flex items-center gap-2 px-3 py-1 bg-slate-100 dark:bg-slate-800 rounded-full text-[10px] font-bold text-slate-400 uppercase"><ClockIcon className="w-3 h-3" /><span>{(activeChapter?.content || '').split(/\s+/).length} Words</span></div>
@@ -607,7 +656,7 @@ const App: React.FC = () => {
               </div>
             </header>
 
-            <article className="min-h-[70vh] pb-32 lg:pb-0">
+            <article className="flex-1 pb-12">
               {viewMode === 'reader' && duration > 0 && (
                 <div className="sticky top-0 z-20 py-4 bg-slate-50/90 dark:bg-slate-950/90 backdrop-blur-md mb-8">
                    <div className="flex flex-col sm:flex-row items-center gap-4">
@@ -641,12 +690,17 @@ const App: React.FC = () => {
               )}
 
               {viewMode === 'editor' ? (
-                <div className="space-y-6">
-                  <textarea value={novelText} onChange={e => setNovelText(e.target.value)} placeholder="Type or paste your narrative here..." className="w-full h-[60vh] sm:h-[75vh] p-6 sm:p-12 bg-white dark:bg-slate-900 rounded-3xl shadow-xl border-none font-serif text-lg sm:text-xl leading-relaxed resize-none scrollbar-hide" />
-                  <AdUnit slot="9677805119" className="max-w-xl mx-auto" />
+                <div className="space-y-6 h-full flex flex-col relative group">
+                  <div className="absolute top-4 right-4 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
+                     <div className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-sm px-3 py-1.5 rounded-full flex items-center gap-2 border dark:border-slate-700 shadow-sm">
+                        <CloudArrowUpIcon className="w-3.5 h-3.5 text-indigo-500" />
+                        <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-tighter">Auto-save Enabled</span>
+                     </div>
+                  </div>
+                  <textarea value={novelText} onChange={e => setNovelText(e.target.value)} placeholder="Type or paste your narrative here..." className="w-full flex-1 min-h-[50vh] p-6 sm:p-12 bg-white dark:bg-slate-900 rounded-3xl shadow-xl border-none font-serif text-lg sm:text-xl leading-relaxed resize-none scrollbar-hide focus:ring-0" />
                 </div>
               ) : (
-                <div className="w-full min-h-[60vh] sm:min-h-[75vh] p-6 sm:p-12 bg-white dark:bg-slate-900 rounded-3xl shadow-xl font-serif text-lg sm:text-xl leading-relaxed text-slate-800 dark:text-slate-100 whitespace-pre-wrap">
+                <div className="w-full min-h-[60vh] p-6 sm:p-12 bg-white dark:bg-slate-900 rounded-3xl shadow-xl font-serif text-lg sm:text-xl leading-relaxed text-slate-800 dark:text-slate-100 whitespace-pre-wrap">
                   {processedData.length === 0 ? <div className="flex flex-col items-center justify-center py-40 opacity-10"><BookOpenIcon className="w-16 sm:w-24 h-16 sm:h-24 mb-4" /><p className="font-sans font-bold uppercase tracking-widest text-xs sm:text-base">Library is Empty</p></div> : 
                     processedData.map((s, si) => (
                       <span key={si} className={`inline-block rounded transition-all duration-700 ${si === activeIndices.activeSentenceIdx ? 'bg-indigo-600/5 dark:bg-indigo-400/10' : ''}`}>
@@ -657,12 +711,13 @@ const App: React.FC = () => {
                       </span>
                     ))
                   }
-                  <div className="mt-20">
-                     <AdUnit slot="9677805119" />
-                  </div>
                 </div>
               )}
             </article>
+
+            <div className="mt-auto pt-8 pb-4">
+              <AdUnit className="w-full border-indigo-500/10 dark:border-indigo-400/10" />
+            </div>
           </div>
         </div>
 
@@ -681,7 +736,7 @@ const App: React.FC = () => {
             </div>
             <footer className="p-4 lg:p-6 bg-white/95 dark:bg-slate-900/95 border-t dark:border-slate-800 backdrop-blur-md mb-safe shrink-0">
               <div className="flex gap-2">
-                <input type="text" value={userInput} onChange={e => setUserInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSendMessage()} placeholder="Ask about plot or characters..." className="flex-1 px-5 py-3 bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-2xl outline-none text-sm ring-indigo-500 focus:ring-2 transition-all" />
+                <input type="text" value={userInput} onChange={e => setUserInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSendMessage()} placeholder="Ask about plot..." className="flex-1 px-5 py-3 bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-2xl outline-none text-sm ring-indigo-500 focus:ring-2 transition-all" />
                 <button onClick={handleSendMessage} disabled={isChatting || !userInput.trim()} className="bg-indigo-600 text-white p-3 rounded-2xl shadow-lg disabled:opacity-30 hover:bg-indigo-700 active:scale-95 transition-all"><ArrowPathIcon className={`w-6 h-6 ${isChatting ? 'animate-spin' : ''}`} /></button>
               </div>
             </footer>

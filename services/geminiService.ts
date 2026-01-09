@@ -1,61 +1,98 @@
+
 import { GoogleGenAI, Modality, Type } from "@google/genai";
 import { ReadingTone, VoiceGender, CharacterBio, SceneMetadata } from "../types.ts";
 
-// Support for multiple keys with rotation/fallback logic
-// We attempt to pull from various standard Netlify/Environment variable names
-const keys = [
+// Define a pool of keys for rotation
+const API_KEYS = [
   process.env.API_KEY,
-  (process.env as any).GEMINI_API_KEY,
-  (process.env as any).GEMINI_API_KEY_2,
-  (process.env as any).GEMINI_API_KEY_3
-].filter(Boolean) as string[];
+  process.env.GEMINI_API_KEY,
+  process.env.GEMINI_API_KEY_2,
+  process.env.GEMINI_API_KEY_3
+].filter((key): key is string => Boolean(key));
 
 let currentKeyIndex = 0;
 
 /**
- * Returns a new GoogleGenAI instance using the current active key from the rotation.
+ * Returns a new AI client using the current active key in rotation.
  */
-function getAIClient() {
-  const apiKey = keys.length > 0 ? keys[currentKeyIndex] : (process.env.API_KEY || '');
+const getAIClient = () => {
+  // Use modulo to ensure we loop through the pool indefinitely
+  const apiKey = API_KEYS[currentKeyIndex % API_KEYS.length] || process.env.API_KEY || "";
   return new GoogleGenAI({ apiKey });
-}
+};
 
 /**
- * Executes an AI operation with automatic key rotation and retry on failure.
- * This ensures the app stays running even if one key hits a quota or rate limit.
+ * Robust retry utility with key rotation and exponential backoff.
+ * If a 429 (Rate Limit) is detected, it switches to the next key in the pool.
  */
-async function withFallback<T>(operation: (ai: any) => Promise<T>): Promise<T> {
-  let lastError;
-  const attempts = Math.max(1, keys.length);
-
-  for (let i = 0; i < attempts; i++) {
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 6): Promise<T> {
+  let delay = 1000;
+  for (let i = 0; i < maxRetries; i++) {
     try {
-      const ai = getAIClient();
-      return await operation(ai);
+      return await fn();
     } catch (e: any) {
-      console.warn(`API attempt ${i + 1} failed with key index ${currentKeyIndex}. Rotating keys...`, e);
-      lastError = e;
-      
-      // Rotate to next key if available
-      if (keys.length > 1) {
-        currentKeyIndex = (currentKeyIndex + 1) % keys.length;
-      } else {
-        throw e; // No other keys to try
+      // Check for rate limit status codes or common error strings
+      const errorMsg = e.message?.toLowerCase() || "";
+      const isRateLimit = e.status === 429 || errorMsg.includes('429') || errorMsg.includes('too many requests') || errorMsg.includes('quota');
+      const isRetryable = isRateLimit || (e.status >= 500 && e.status <= 599) || errorMsg.includes('fetch');
+
+      if (i === maxRetries - 1 || !isRetryable) {
+        console.error(`Final API failure after ${i + 1} attempts using Key Index ${currentKeyIndex % API_KEYS.length}:`, e);
+        throw e;
       }
-      
-      // Short delay before retry to avoid rapid-fire failures
-      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // If we hit a rate limit and have multiple keys, rotate immediately
+      if (isRateLimit && API_KEYS.length > 1) {
+        currentKeyIndex++;
+        console.warn(`Rate limit reached. Rotating to API Key ${currentKeyIndex % API_KEYS.length + 1} of ${API_KEYS.length}`);
+      }
+
+      console.warn(`API error encountered, retrying in ${delay}ms (Attempt ${i + 1}/${maxRetries})...`);
+      await new Promise(r => setTimeout(r, delay));
+      delay *= 1.5; // Exponential backoff
     }
   }
-  throw lastError;
+  throw new Error("Unexpected retry loop termination");
 }
 
 export const geminiService = {
   /**
-   * Analyzes a specific chunk of text to extract narrative metadata.
+   * Generates a professional app logo with key-rotation fallback.
+   */
+  async generateAppLogo(): Promise<string> {
+    return withRetry(async () => {
+      const ai = getAIClient();
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: {
+          parts: [
+            {
+              text: 'A professional, minimalist square app icon for “Ivanchat”, an AI conversation platform. The icon features a custom abstract logo mark formed from the letters “IV”, designed using clean white line-art with subtle geometric symmetry, accented by a soft indigo glow to represent intelligence and clarity, set against a deep navy blue background. Flat vector style, modern tech aesthetic, high contrast, centered composition, no text, no book, no chat bubbles, premium and scalable for favicon and mobile app icon use.',
+            },
+          ],
+        },
+        config: {
+          imageConfig: {
+            aspectRatio: "1:1"
+          }
+        },
+      });
+
+      for (const part of response.candidates[0].content.parts) {
+        if (part.inlineData) {
+          return `data:image/png;base64,${part.inlineData.data}`;
+        }
+      }
+      throw new Error("No image data in response.");
+    });
+  },
+
+  /**
+   * Analyzes text for narrative metadata with key-rotation fallback.
    */
   async analyzeScene(text: string): Promise<SceneMetadata> {
-    return withFallback(async (ai) => {
+    return withRetry(async () => {
+      const ai = getAIClient();
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: `Analyze this scene for audiobook production. Identify mood, pacing, characters, and key emphasis phrases.
@@ -83,10 +120,11 @@ export const geminiService = {
   },
 
   /**
-   * Generates highly expressive narrator audio.
+   * Generates expressive narrator audio with key-rotation fallback.
    */
   async textToSpeech(text: string, tones: ReadingTone[], gender: VoiceGender, pitch: number, breaths: boolean, metadata?: SceneMetadata): Promise<string> {
-    return withFallback(async (ai) => {
+    return withRetry(async () => {
+      const ai = getAIClient();
       const toneList = tones.length > 0 ? tones.map(t => t.toLowerCase()) : ['neutral'];
       const toneDescription = toneList.join(' + ');
         
@@ -120,10 +158,11 @@ export const geminiService = {
   },
 
   /**
-   * Extract key characters and generate biographies.
+   * Extract key characters from manuscript with key-rotation fallback.
    */
   async extractCharacters(contextText: string): Promise<CharacterBio[]> {
-    return withFallback(async (ai) => {
+    return withRetry(async () => {
+      const ai = getAIClient();
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: `Identify characters and generate bios. Sample: ${contextText.substring(0, 10000)}...`,
@@ -152,10 +191,11 @@ export const geminiService = {
   },
 
   /**
-   * Literary Analysis Chatbot.
+   * Literary Analysis Chatbot with key-rotation fallback.
    */
   async chat(message: string, contextText: string, characters: CharacterBio[], history: { role: 'user' | 'model', parts: { text: string }[] }[]): Promise<string> {
-    return withFallback(async (ai) => {
+    return withRetry(async () => {
+      const ai = getAIClient();
       const characterContext = characters.length > 0 
         ? "CHARACTERS:\n" + characters.map(c => `- ${c.name} (${c.role}): ${c.description}`).join("\n")
         : "";
@@ -169,15 +209,16 @@ export const geminiService = {
       });
 
       const response = await chatInstance.sendMessage({ message });
-      return response.text || "Could not generate a literary response.";
+      return response.text || "I'm having trouble analyzing the text at the moment.";
     });
   },
 
   /**
-   * Voice Command Transcription.
+   * Transcribe user audio with key-rotation fallback.
    */
   async transcribeAudio(base64Audio: string): Promise<string> {
-    return withFallback(async (ai) => {
+    return withRetry(async () => {
+      const ai = getAIClient();
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: {
