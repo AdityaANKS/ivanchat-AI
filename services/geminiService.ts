@@ -2,18 +2,11 @@
 import { GoogleGenAI, Modality, Type } from "@google/genai";
 import { ReadingTone, VoiceGender, SceneMetadata } from "../types.ts";
 
-const KEY_POOL = [
-  process.env.API_KEY || process.env.GEMINI_API_KEY,
-  process.env.GEMINI_API_KEY_2,
-  process.env.GEMINI_API_KEY_3
-].filter((k): k is string => !!k && k !== "undefined");
-
-let keyCursor = 0;
-
+/**
+ * Initializes the Google GenAI client using exclusively process.env.API_KEY.
+ */
 const getAIClient = () => {
-  const apiKey = KEY_POOL[keyCursor % KEY_POOL.length];
-  keyCursor++;
-  return new GoogleGenAI({ apiKey });
+  return new GoogleGenAI({ apiKey: process.env.API_KEY || "" });
 };
 
 async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5): Promise<T> {
@@ -22,10 +15,11 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5): Promise<T> {
     try {
       return await fn();
     } catch (e: any) {
+      // 429 is Too Many Requests
       const is429 = e.status === 429 || e.message?.includes("429");
       if (i === maxRetries - 1) throw e;
-      console.warn(`API attempt ${i + 1} failed. Rotating key and retrying in ${delay}ms...`);
-      await new Promise(r => setTimeout(r, is429 ? delay * 2 : delay));
+      console.warn(`API attempt ${i + 1} failed. Retrying in ${delay}ms...`);
+      await new Promise(r => setTimeout(r, is429 ? delay * 2.5 : delay));
       delay *= 2;
     }
   }
@@ -39,22 +33,17 @@ export const geminiService = {
       const voiceName = gender === VoiceGender.FEMALE ? 'Kore' : 'Fenrir';
       const toneStr = tones.join(', ');
 
-      const prompt = `Act as a consistent, world-class professional audiobook narrator. 
-      Vocal Profile: ${gender}, Base Tones: ${toneStr}. 
-      Vocal Modulation: Pitch ${pitch}%. 
-      Performance Requirements: 
-      1. Determinism: Maintain identical vocal texture, pacing, and energy throughout. 
-      2. Emotional Depth: Infuse the prose with a ${metadata?.mood || 'narrative'} mood. 
-      3. Breaths: ${breaths ? 'Incorporate natural, audible breaths at punctuation to increase realism.' : 'Maintain a clean, breath-minimized studio delivery.'}
-      4. Low Randomness: Focus on clarity and consistency.
-
-      TEXT: "${text}"`;
+      const prompt = `Act as a consistent, world-class professional audiobook narrator.
+      Voice: ${gender}, Tone: ${toneStr}, Pitch: ${pitch}%, Breaths: ${breaths ? 'Natural/Audible' : 'None'}.
+      Context: ${metadata?.mood || 'Neutral'} mood, ${metadata?.pacing || 'moderate'} pace.
+      Strict Requirement: Deliver a steady performance with deterministic pacing.
+      Narrate the following: "${text}"`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
         contents: [{ parts: [{ text: prompt }] }],
         config: {
-          temperature: 0.3, // Crucial for deterministic reassembly
+          temperature: 0.3, // Low randomness for consistency in bulk reassembly
           responseModalities: [Modality.AUDIO],
           speechConfig: {
             voiceConfig: {
@@ -65,7 +54,7 @@ export const geminiService = {
       });
 
       const data = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (!data) throw new Error("Synthesis payload missing");
+      if (!data) throw new Error("No audio data returned");
       return data;
     });
   },
@@ -75,7 +64,7 @@ export const geminiService = {
       const ai = getAIClient();
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: `Analyze scene mood/pacing for TTS: "${text.substring(0, 1000)}"`,
+        contents: `Analyze scene mood/pacing for high-quality TTS: "${text.substring(0, 1000)}"`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -85,7 +74,8 @@ export const geminiService = {
               pacing: { type: Type.STRING, enum: ["fast", "slow", "moderate"] },
               keyCharacters: { type: Type.ARRAY, items: { type: Type.STRING } },
               keyPhrases: { type: Type.ARRAY, items: { type: Type.STRING } }
-            }
+            },
+            required: ["mood", "pacing"]
           }
         }
       });
@@ -98,7 +88,7 @@ export const geminiService = {
       const ai = getAIClient();
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash-image',
-        contents: { parts: [{ text: 'Sophisticated literary app icon, dark indigo, minimalist fountain pen nib.' }] },
+        contents: { parts: [{ text: 'Sophisticated literary app icon, dark indigo, minimalist fountain pen nib design.' }] },
       });
       const part = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
       return part ? `data:image/png;base64,${part.inlineData.data}` : '';
@@ -109,10 +99,10 @@ export const geminiService = {
     const ai = getAIClient();
     const chat = ai.chats.create({
       model: 'gemini-3-flash-preview',
-      config: { systemInstruction: `You are a literary analyst helping with this text: ${context.substring(0, 5000)}` },
+      config: { systemInstruction: `You are a literary analyst assisting with the following text. Context length: ${context.length} characters.` },
       history
     });
-    const res = await chat.sendMessage({ message });
-    return res.text || "Error communicating with AI";
+    const res = await chat.sendMessage({ message: `Based on the provided manuscript, ${message}` });
+    return res.text || "Assistant unable to respond.";
   }
 };

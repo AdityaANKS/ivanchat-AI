@@ -29,26 +29,11 @@ export interface ChatMessage {
   timestamp: Date;
 }
 
-export interface ChatSession {
-  id: string;
-  name: string;
-  messages: ChatMessage[];
-  lastUpdated: Date;
-}
-
 export interface SceneMetadata {
   mood: string;
   pacing: 'fast' | 'slow' | 'moderate';
   keyCharacters: string[];
   keyPhrases: string[];
-}
-
-export interface CharacterBio {
-  name: string;
-  role: string;
-  description: string;
-  traits: string[];
-  mentions: number;
 }
 
 export interface Chapter {

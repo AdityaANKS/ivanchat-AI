@@ -7,11 +7,11 @@ import {
   PlayIcon, PauseIcon, ChatBubbleLeftRightIcon, ArrowPathIcon, BookOpenIcon, 
   SpeakerWaveIcon, UserIcon, MoonIcon, SunIcon, SparklesIcon, HashtagIcon, 
   ArrowDownTrayIcon, Bars3Icon, XMarkIcon, TrashIcon, EyeIcon, EyeSlashIcon,
-  MusicalNoteIcon, SparklesIcon as SparklesOutline
+  MusicalNoteIcon
 } from '@heroicons/react/24/outline';
 
 const App: React.FC = () => {
-  // --- States ---
+  // --- Global Application States ---
   const [appLogo, setAppLogo] = useState<string>(() => localStorage.getItem('ivanchat_app_logo') || '');
   const [novelText, setNovelText] = useState<string>(() => localStorage.getItem('ivanchat_novel_text') || '');
   const [selectedTones, setSelectedTones] = useState<ReadingTone[]>([ReadingTone.NEUTRAL]);
@@ -23,6 +23,8 @@ const App: React.FC = () => {
   const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('ivanchat_theme') !== 'light');
   const [viewMode, setViewMode] = useState<'editor' | 'reader'>('editor');
   const [toasts, setToasts] = useState<{id: string, message: string, type: string}[]>([]);
+  
+  // --- Playback States ---
   const [audioSpeed, setAudioSpeed] = useState(1.0);
   const [pitch, setPitch] = useState(0);
   const [includeBreaths, setIncludeBreaths] = useState(true);
@@ -32,10 +34,10 @@ const App: React.FC = () => {
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
   const [genProgress, setGenProgress] = useState(0);
   const [audioChunks, setAudioChunks] = useState<AudioChunkMetadata[]>([]);
-  const [showChat, setShowChat] = useState(false);
   const [followActiveText, setFollowActiveText] = useState(true);
+  const [showChat, setShowChat] = useState(false);
 
-  // --- Refs ---
+  // --- Audio Engine Refs ---
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
   const currentAudioBufferRef = useRef<AudioBuffer | null>(null);
@@ -51,6 +53,7 @@ const App: React.FC = () => {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
   }, []);
 
+  // --- Initializers ---
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDarkMode);
     localStorage.setItem('ivanchat_theme', isDarkMode ? 'dark' : 'light');
@@ -60,7 +63,18 @@ const App: React.FC = () => {
     localStorage.setItem('ivanchat_novel_text', novelText);
   }, [novelText]);
 
-  // --- Chapter & Highlighting Engine ---
+  useEffect(() => {
+    if (!appLogo && !isGeneratingAudio) {
+      geminiService.generateAppLogo().then(logo => {
+        if (logo) {
+          setAppLogo(logo);
+          localStorage.setItem('ivanchat_app_logo', logo);
+        }
+      }).catch(console.error);
+    }
+  }, []);
+
+  // --- Linguistic Engine ---
   const chapters = useMemo(() => {
     const text = (novelText || '').trim();
     if (!text) return [{ id: 'full', title: 'Manuscript', content: '', startIndex: 0 }];
@@ -101,7 +115,7 @@ const App: React.FC = () => {
     });
   }, [activeChapter]);
 
-  // Precise Timeline Resolver
+  // Timeline Engine
   const currentTimelineIndices = useMemo(() => {
     if (duration === 0 || audioChunks.length === 0) return { sIdx: -1, wIdx: -1 };
     
@@ -114,7 +128,8 @@ const App: React.FC = () => {
     const sData = processedData[sentence.globalIndex];
     if (!sData) return { sIdx: -1, wIdx: -1 };
 
-    const sProgress = (currentTime - sentence.audioStart) / (sentence.audioEnd - sentence.audioStart || 1);
+    const sDuration = sentence.audioEnd - sentence.audioStart;
+    const sProgress = (currentTime - sentence.audioStart) / (sDuration || 1);
     const wIdx = Math.floor(sProgress * sData.words.length);
     
     return { sIdx: sentence.globalIndex, wIdx: Math.min(wIdx, sData.words.length - 1) };
@@ -126,12 +141,14 @@ const App: React.FC = () => {
     }
   }, [currentTimelineIndices.wIdx, viewMode, followActiveText]);
 
+  // --- Cache Restore ---
   const loadChapterCache = useCallback(async (chapterId: string) => {
     try {
       const blob = await getAudioFromDB(`audio_${chapterId}`);
       if (blob && blob.size > 0) {
-        if (!audioContextRef.current) audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-        const buffer = await audioContextRef.current.decodeAudioData(await blob.arrayBuffer());
+        if (!audioContextRef.current) audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+        const arrayBuffer = await blob.arrayBuffer();
+        const buffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
         const storedMeta = localStorage.getItem(`ivanchat_meta_${chapterId}`);
         if (storedMeta) {
           const metaArr = JSON.parse(storedMeta);
@@ -140,15 +157,11 @@ const App: React.FC = () => {
           setDuration(buffer.duration);
           setCurrentTime(0);
           pausedTimeRef.current = 0;
-          addToast("Cache restored", "info");
+          addToast("Session restored", "info");
         }
-      } else {
-        currentAudioBufferRef.current = null;
-        setAudioChunks([]);
-        setDuration(0);
       }
     } catch (e) {
-      console.error("Cache restoration failed:", e);
+      console.error("Cache load error:", e);
     }
   }, [addToast]);
 
@@ -156,6 +169,7 @@ const App: React.FC = () => {
     loadChapterCache(selectedChapterId);
   }, [selectedChapterId, loadChapterCache]);
 
+  // --- Playback Engine ---
   const playBuffer = (buffer: AudioBuffer, offset: number) => {
     if (!audioContextRef.current) audioContextRef.current = new AudioContext({ sampleRate: 24000 });
     if (audioContextRef.current.state === 'suspended') audioContextRef.current.resume();
@@ -185,8 +199,8 @@ const App: React.FC = () => {
       }
       setIsAudioPlaying(false);
     } else {
-      const s = Math.min(pausedTimeRef.current, currentAudioBufferRef.current.duration);
-      playBuffer(currentAudioBufferRef.current, s);
+      const startPos = Math.min(pausedTimeRef.current, currentAudioBufferRef.current.duration - 0.1);
+      playBuffer(currentAudioBufferRef.current, Math.max(0, startPos));
       setIsAudioPlaying(true);
     }
   };
@@ -208,37 +222,36 @@ const App: React.FC = () => {
     return () => { if (progressRequestRef.current) cancelAnimationFrame(progressRequestRef.current); };
   }, [isAudioPlaying, audioSpeed]);
 
-  // --- Synthesis Engine (Fault-Tolerant, Ordered Pipeline) ---
+  // --- Synthesis Pipeline ---
   const startSynthesis = async () => {
-    const content = activeChapter?.content.trim();
-    if (!content) return addToast("Manuscript is empty", "error");
+    if (!activeChapter?.content.trim()) return addToast("Editor is empty", "error");
 
     try {
       setIsGeneratingAudio(true);
       setGenProgress(0);
       setIsSidebarOpen(false);
 
-      // Deterministic Sizing: 2.8 words/sec * 175s (~2:55m) = ~490 words per chunk
-      const targetWordsPerChunk = 490;
+      // Fault-Tolerant Pipeline: Target ~175s/chunk (~500 words)
+      const targetWordsPerChunk = 500;
       const chunks: { text: string; sentences: any[] }[] = [];
-      let curChunkText = "";
-      let curChunkSents: any[] = [];
-      let curWordCount = 0;
+      let currentChunkText = "";
+      let currentChunkSents: any[] = [];
+      let currentWordCount = 0;
 
       processedData.forEach((s) => {
         const sWC = s.words.length;
-        if (curWordCount + sWC > targetWordsPerChunk && curChunkText.length > 0) {
-          chunks.push({ text: curChunkText, sentences: curChunkSents });
-          curChunkText = s.text; curChunkSents = [s]; curWordCount = sWC;
+        if (currentWordCount + sWC > targetWordsPerChunk && currentChunkText.length > 0) {
+          chunks.push({ text: currentChunkText, sentences: currentChunkSents });
+          currentChunkText = s.text; currentChunkSents = [s]; currentWordCount = sWC;
         } else {
-          curChunkText += s.text; curChunkSents.push(s); curWordCount += sWC;
+          currentChunkText += s.text; currentChunkSents.push(s); currentWordCount += sWC;
         }
       });
-      if (curChunkText) chunks.push({ text: curChunkText, sentences: curChunkSents });
+      if (currentChunkText) chunks.push({ text: currentChunkText, sentences: currentChunkSents });
 
       const ctx = new AudioContext({ sampleRate: 24000 });
       const results: { buf: AudioBuffer, meta: any, chunkIndex: number }[] = new Array(chunks.length);
-      const concurrency = 3;
+      const concurrency = 3; 
 
       for (let i = 0; i < chunks.length; i += concurrency) {
         const batch = chunks.slice(i, i + concurrency);
@@ -252,13 +265,15 @@ const App: React.FC = () => {
         }));
       }
 
-      const totalSamples = results.reduce((acc, r) => acc + r.buf.length, 0);
+      // Reassembly Step
+      const totalSamples = results.reduce((acc, r) => acc + (r ? r.buf.length : 0), 0);
       const merged = ctx.createBuffer(1, totalSamples, 24000);
       let sampleOffset = 0;
       let timeOffset = 0;
       const metadata: AudioChunkMetadata[] = [];
 
       results.forEach((r, idx) => {
+        if (!r) return;
         const chunkData = chunks[idx];
         merged.getChannelData(0).set(r.buf.getChannelData(0), sampleOffset);
         
@@ -297,28 +312,58 @@ const App: React.FC = () => {
       audioContextRef.current = ctx;
       playBuffer(merged, 0);
       setIsAudioPlaying(true);
-      addToast("High-fidelity narration ready", "success");
+      addToast("Narration reassembled", "success");
     } catch (e) {
       console.error(e);
-      addToast("Synthesis drift or API error. Retrying recommended.", "error");
+      addToast("Synthesis failed. Check API balance.", "error");
     } finally {
       setIsGeneratingAudio(false);
     }
   };
 
-  const toggleTone = (tone: ReadingTone) => {
-    setSelectedTones(prev => {
-      if (prev.includes(tone)) {
-        if (prev.length === 1) return prev;
-        return prev.filter(t => t !== tone);
-      }
-      return [...prev, tone];
-    });
+  const handleSendMessage = async () => {
+    if (!userInput.trim()) return;
+    const msg: ChatMessage = { id: Date.now().toString(), role: 'user', text: userInput, timestamp: new Date() };
+    setMessages(prev => [...prev, msg]);
+    setUserInput('');
+    setIsChatting(true);
+    try {
+      const hist = messages.map(m => ({ role: m.role, parts: [{ text: m.text }] }));
+      const res = await geminiService.chat(msg.text, novelText, hist);
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: res, timestamp: new Date() }]);
+    } catch (e) {
+      addToast("AI Assistant error", "error");
+    } finally {
+      setIsChatting(false);
+    }
   };
 
   return (
     <div className="flex h-screen-safe bg-slate-50 dark:bg-slate-950 overflow-hidden text-slate-900 dark:text-slate-100 font-sans transition-colors duration-500 relative">
       
+      {/* TOASTS */}
+      <div className="fixed top-6 right-6 z-[200] flex flex-col gap-3 w-full max-w-sm px-4 pointer-events-none">
+        {toasts.map(t => (
+          <div key={t.id} className={`flex items-center gap-3 px-5 py-4 rounded-2xl shadow-2xl border backdrop-blur-xl animate-in slide-in-from-right duration-300 pointer-events-auto ${t.type === 'success' ? 'bg-indigo-600/90 border-indigo-400 text-white' : t.type === 'error' ? 'bg-rose-600/90 border-rose-400 text-white' : 'bg-white/90 dark:bg-slate-800/90 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white'}`}>
+            <span className="text-sm font-semibold flex-1">{t.message}</span>
+            <button onClick={() => setToasts(prev => prev.filter(x => x.id !== t.id))} className="opacity-50"><XMarkIcon className="w-4 h-4" /></button>
+          </div>
+        ))}
+      </div>
+
+      {/* OVERLAY LOADER */}
+      {isGeneratingAudio && (
+        <div className="fixed inset-0 z-[100] bg-slate-900/90 backdrop-blur-2xl flex flex-col items-center justify-center text-white animate-in fade-in duration-500">
+           <div className="w-24 h-24 mb-8 relative">
+              <div className="absolute inset-0 border-4 border-indigo-500/20 rounded-full" />
+              <div className="absolute inset-0 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+              <div className="absolute inset-0 flex items-center justify-center font-bold text-xs">{Math.round(genProgress)}%</div>
+           </div>
+           <h2 className="text-2xl font-bold tracking-tight mb-2">Architecting Narration</h2>
+           <p className="text-slate-400 text-sm italic">Assembling high-fidelity audio chunks across worker nodes...</p>
+        </div>
+      )}
+
       {/* SIDEBAR */}
       <aside className={`fixed inset-y-0 left-0 z-40 w-[320px] bg-white dark:bg-slate-900 border-r dark:border-slate-800 shadow-2xl transition-transform lg:translate-x-0 lg:static flex flex-col shrink-0 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="p-6 border-b dark:border-slate-800 flex items-center justify-between shrink-0">
@@ -342,13 +387,10 @@ const App: React.FC = () => {
           </section>
 
           <section>
-            <div className="text-slate-400 font-bold uppercase text-[10px] tracking-widest mb-3 flex justify-between items-center">
-              <span>Chapter Select</span>
-              <HashtagIcon className="w-3 h-3" />
-            </div>
+            <div className="text-slate-400 font-bold uppercase text-[10px] tracking-widest mb-3">Chapter Navigation</div>
             <div className="space-y-1 max-h-40 overflow-y-auto scrollbar-hide border-l dark:border-slate-800 pl-4">
               {chapters.map(ch => (
-                <button key={ch.id} onClick={() => setSelectedChapterId(ch.id)} className={`w-full text-left px-3 py-2 rounded-xl text-xs transition-all flex items-center gap-3 ${selectedChapterId === ch.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'bg-transparent text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'}`}>
+                <button key={ch.id} onClick={() => setSelectedChapterId(ch.id)} className={`w-full text-left px-3 py-2 rounded-xl text-xs transition-all flex items-center gap-3 ${selectedChapterId === ch.id ? 'bg-indigo-600 text-white shadow-lg' : 'bg-transparent text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'}`}>
                   <span className="truncate font-medium">{ch.title}</span>
                 </button>
               ))}
@@ -357,23 +399,23 @@ const App: React.FC = () => {
 
           <section>
             <div className="text-slate-400 font-bold uppercase text-[10px] tracking-widest mb-3">Narrative Profile</div>
-            <div className="bg-slate-100 dark:bg-slate-800 p-4 rounded-2xl space-y-4">
+            <div className="bg-slate-100 dark:bg-slate-800 p-4 rounded-2xl space-y-4 border dark:border-slate-700">
                <div className="flex gap-1">
                   {Object.values(VoiceGender).map(g => (
                     <button key={g} onClick={() => setGender(g)} className={`flex-1 py-1.5 text-[10px] rounded-lg border transition-all ${gender === g ? 'bg-indigo-600 border-indigo-600 text-white shadow-md' : 'border-slate-300 dark:border-slate-700 text-slate-500 hover:border-indigo-400'}`}>{g}</button>
                   ))}
                </div>
-               <div className="grid grid-cols-2 gap-2">
+               <div className="grid grid-cols-2 gap-1.5">
                  {Object.values(ReadingTone).map(t => (
-                   <button key={t} onClick={() => toggleTone(t)} className={`px-2 py-1.5 rounded-lg text-[10px] border transition-all truncate ${selectedTones.includes(t) ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm' : 'border-slate-300 dark:border-slate-700 text-slate-500'}`}>{t}</button>
+                   <button key={t} onClick={() => setSelectedTones(p => p.includes(t) ? (p.length > 1 ? p.filter(x => x !== t) : p) : [...p, t])} className={`px-2 py-1.5 rounded-lg text-[10px] border transition-all truncate ${selectedTones.includes(t) ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm' : 'border-slate-300 dark:border-slate-700 text-slate-500'}`}>{t}</button>
                  ))}
                </div>
                <div className="space-y-1 pt-2">
-                  <div className="flex justify-between text-[10px] font-bold"><span>Vocal Pitch</span><span>{pitch}%</span></div>
+                  <div className="flex justify-between text-[10px] font-bold"><span>Pitch Offset</span><span>{pitch}%</span></div>
                   <input type="range" min="-30" max="30" value={pitch} onChange={e => setPitch(parseInt(e.target.value))} className="w-full h-1 accent-indigo-600 appearance-none bg-slate-300 dark:bg-slate-700 rounded-full cursor-pointer" />
                </div>
                <div className="flex items-center justify-between pt-2">
-                  <span className="text-[10px] font-bold uppercase text-slate-400">Natural Breaths</span>
+                  <span className="text-[10px] font-bold uppercase text-slate-400">Audible Breaths</span>
                   <button onClick={() => setIncludeBreaths(!includeBreaths)} className={`w-10 h-5 rounded-full relative transition-colors ${includeBreaths ? 'bg-indigo-600' : 'bg-slate-300 dark:bg-slate-700'}`}>
                     <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${includeBreaths ? 'translate-x-5' : ''}`} />
                   </button>
@@ -383,12 +425,12 @@ const App: React.FC = () => {
 
           <div className="pt-4 pb-12 space-y-2">
             <button onClick={startSynthesis} disabled={isGeneratingAudio} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold text-sm shadow-xl shadow-indigo-600/30 hover:bg-indigo-700 active:scale-95 disabled:opacity-50 transition-all flex items-center justify-center gap-2">
-              {isGeneratingAudio ? <ArrowPathIcon className="w-5 h-5 animate-spin" /> : <PlayIcon className="w-5 h-5" />}
-              {isGeneratingAudio ? `Encoding ${Math.round(genProgress)}%` : 'Generate Master Track'}
+              {isGeneratingAudio ? <ArrowPathIcon className="w-5 h-5 animate-spin" /> : <MusicalNoteIcon className="w-5 h-5" />}
+              Generate Narration
             </button>
             {duration > 0 && (
               <button onClick={async () => { await saveAudioToDB(`audio_${selectedChapterId}`, new Blob([])); window.location.reload(); }} className="w-full flex items-center justify-center gap-2 py-2 text-[10px] text-slate-400 hover:text-rose-500 transition-colors uppercase font-bold tracking-widest">
-                <TrashIcon className="w-3 h-3" /> Purge Chapter Cache
+                <TrashIcon className="w-3 h-3" /> Clear Local Cache
               </button>
             )}
           </div>
@@ -409,14 +451,13 @@ const App: React.FC = () => {
               <div className="flex items-center gap-4">
                 <div className="w-16 h-16 rounded-2xl overflow-hidden shadow-xl border dark:border-slate-700 bg-white dark:bg-slate-800 flex items-center justify-center relative">
                   {appLogo ? <img src={appLogo} alt="Logo" className="w-full h-full object-cover" /> : <div className="text-indigo-600 font-bold text-xl">IV</div>}
-                  {duration > 0 && <div className="absolute -bottom-1 -right-1 bg-emerald-500 w-4 h-4 rounded-full border-2 border-white dark:border-slate-900" />}
                 </div>
                 <div>
                   <h2 className="text-4xl font-serif font-bold text-slate-800 dark:text-slate-100">{viewMode === 'editor' ? 'Manuscript Editor' : 'Immersive Reader'}</h2>
                   <div className="flex items-center gap-2 text-slate-400 text-[10px] font-bold uppercase tracking-widest mt-1">
                     <span className="text-indigo-500">{activeChapter?.title}</span>
                     <span className="opacity-20">/</span>
-                    <span className="text-emerald-500 font-bold">{duration > 0 ? `${Math.round(duration / 60)}m Narrated` : "Draft Mode"}</span>
+                    <span className="text-emerald-500 font-bold">{duration > 0 ? `${Math.round(duration / 60)}m Master` : "Draft"}</span>
                   </div>
                 </div>
               </div>
@@ -440,14 +481,13 @@ const App: React.FC = () => {
                         </div>
                       </div>
                       <div className="flex items-center gap-4 shrink-0">
-                         <button onClick={() => setFollowActiveText(!followActiveText)} title="Toggle Scroll Lock" className={`p-4 rounded-2xl border transition-all ${followActiveText ? 'bg-indigo-600 text-white border-indigo-500 shadow-lg' : 'bg-slate-800 text-slate-500 border-white/5'}`}>
+                         <button onClick={() => setFollowActiveText(!followActiveText)} title="Toggle Scroll Tracking" className={`p-4 rounded-2xl border transition-all ${followActiveText ? 'bg-indigo-600 text-white border-indigo-500 shadow-lg' : 'bg-slate-800 text-slate-500 border-white/5'}`}>
                             {followActiveText ? <EyeIcon className="w-6 h-6" /> : <EyeSlashIcon className="w-6 h-6" />}
                          </button>
                          <div className="flex items-center gap-3 px-5 py-3 bg-slate-800 rounded-2xl border border-white/5">
                             <select value={audioSpeed} onChange={e => setAudioSpeed(parseFloat(e.target.value))} className="bg-transparent text-[12px] font-bold outline-none text-white cursor-pointer hover:text-indigo-400 transition-colors">
                                <option className="bg-slate-900" value="0.75">0.75x</option>
                                <option className="bg-slate-900" value="1.0">1.0x</option>
-                               <option className="bg-slate-900" value="1.25">1.25x</option>
                                <option className="bg-slate-900" value="1.5">1.5x</option>
                             </select>
                          </div>
@@ -461,14 +501,14 @@ const App: React.FC = () => {
                   value={novelText} 
                   onChange={e => setNovelText(e.target.value)} 
                   placeholder="Paste your epic here..." 
-                  className="w-full flex-1 min-h-[90vh] p-8 sm:p-16 bg-white dark:bg-slate-900 rounded-[3rem] shadow-2xl font-serif text-xl sm:text-2xl leading-[2] focus:ring-8 focus:ring-indigo-500/5 border-none resize-none transition-all scrollbar-hide text-slate-800 dark:text-slate-100" 
+                  className="w-full flex-1 min-h-[90vh] p-8 sm:p-16 bg-white dark:bg-slate-900 rounded-[3rem] shadow-2xl font-serif text-xl sm:text-2xl leading-[2.2] focus:ring-8 focus:ring-indigo-500/5 border-none resize-none transition-all scrollbar-hide text-slate-800 dark:text-slate-100" 
                 />
               ) : (
-                <div className="w-full min-h-[90vh] p-8 sm:p-16 bg-white dark:bg-slate-900 rounded-[3rem] shadow-2xl font-serif text-xl sm:text-2xl leading-[2] whitespace-pre-wrap transition-all relative">
+                <div className="w-full min-h-[90vh] p-8 sm:p-16 bg-white dark:bg-slate-900 rounded-[3rem] shadow-2xl font-serif text-xl sm:text-2xl leading-[2.2] whitespace-pre-wrap transition-all relative">
                   {processedData.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-64 opacity-20">
                        <BookOpenIcon className="w-24 h-24 mb-6" />
-                       <p className="font-sans font-bold uppercase tracking-widest text-sm">Waiting for Narration</p>
+                       <p className="font-sans font-bold uppercase tracking-widest text-sm">No Content Detected</p>
                     </div>
                   ) : (
                     processedData.map((s, si) => {
@@ -497,63 +537,44 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* CHAT FAB */}
-        {!showChat && (
-          <button 
-            onClick={() => setShowChat(true)} 
-            className="fixed bottom-12 right-12 w-20 h-20 bg-indigo-600 text-white rounded-[2.2rem] flex items-center justify-center shadow-[0_20px_50px_rgba(99,102,241,0.5)] hover:scale-110 hover:bg-indigo-500 active:scale-95 transition-all z-50 border border-white/10"
-          >
-            <ChatBubbleLeftRightIcon className="w-10 h-10" />
-          </button>
-        )}
-
+        {/* FLOATING CHAT */}
         {showChat && (
-          <div className="fixed lg:absolute bottom-0 right-0 z-50 flex flex-col glass-panel shadow-[0_-20px_60px_rgba(0,0,0,0.3)] w-full lg:w-[450px] h-[95vh] lg:h-[700px] lg:bottom-12 lg:right-12 rounded-t-[3rem] lg:rounded-[3rem] animate-in slide-in-from-bottom duration-500 border border-slate-200 dark:border-slate-800">
-            <header className="p-8 bg-indigo-600 text-white flex justify-between items-center rounded-t-[3rem] shrink-0">
+          <div className="fixed lg:absolute bottom-0 right-0 z-50 flex flex-col glass-panel shadow-[0_-20px_60px_rgba(0,0,0,0.3)] w-full lg:w-[450px] h-[95vh] lg:h-[750px] lg:bottom-12 lg:right-12 rounded-t-[3rem] lg:rounded-[3rem] animate-in slide-in-from-bottom duration-500 border border-slate-200 dark:border-slate-800 overflow-hidden">
+            <header className="p-8 bg-indigo-600 text-white flex justify-between items-center shrink-0">
                <div className="flex items-center gap-3">
                  <SparklesIcon className="w-6 h-6" />
                  <h3 className="font-bold">Story Architect</h3>
                </div>
                <button onClick={() => setShowChat(false)} className="p-2 hover:bg-white/10 rounded-xl transition-all"><XMarkIcon className="w-8 h-8" /></button>
             </header>
-            <div className="flex-1 overflow-y-auto p-8 space-y-6 scrollbar-hide">
-              {messages.length === 0 && <div className="text-center py-20 opacity-30 italic text-sm">Analyze character arcs or thematic structure.</div>}
+            <div className="flex-1 overflow-y-auto p-8 space-y-6 scrollbar-hide bg-slate-50/50 dark:bg-slate-950/50">
+              {messages.length === 0 && <div className="text-center py-24 opacity-20 italic text-sm">Analyze character arcs, symbolism, or plot structure with your assistant.</div>}
               {messages.map(m => (
                 <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] p-5 rounded-[2rem] text-[15px] ${m.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-tl-none border'}`}>
+                  <div className={`max-w-[85%] p-5 rounded-[2rem] text-[15px] leading-relaxed ${m.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none shadow-indigo-600/20' : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-tl-none border dark:border-slate-700 shadow-sm'}`}>
                     {m.text}
                   </div>
                 </div>
               ))}
-              {isChatting && <div className="text-indigo-600 font-bold text-xs animate-pulse">Assistant is thinking...</div>}
+              {isChatting && <div className="text-indigo-600 font-bold text-xs animate-pulse flex items-center gap-2"><ArrowPathIcon className="w-3 h-3 animate-spin" /> Assistant Thinking...</div>}
             </div>
-            <footer className="p-6 border-t dark:border-slate-800 shrink-0">
+            <footer className="p-6 border-t dark:border-slate-800 bg-white dark:bg-slate-900 shrink-0">
               <div className="flex gap-3">
-                <input type="text" value={userInput} onChange={e => setUserInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && !isChatting && handleSendMessage()} className="flex-1 px-6 py-4 bg-slate-100 dark:bg-slate-800 rounded-2xl outline-none focus:ring-2 ring-indigo-500 transition-all" placeholder="Ask about the plot..." />
+                <input type="text" value={userInput} onChange={e => setUserInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && !isChatting && handleSendMessage()} className="flex-1 px-6 py-4 bg-slate-100 dark:bg-slate-800 rounded-2xl outline-none focus:ring-2 ring-indigo-500 transition-all text-sm" placeholder="Query the assistant..." />
+                <button onClick={handleSendMessage} disabled={isChatting || !userInput.trim()} className="p-4 bg-indigo-600 text-white rounded-2xl hover:bg-indigo-700 active:scale-95 disabled:opacity-30 transition-all"><ArrowPathIcon className={`w-5 h-5 ${isChatting ? 'animate-spin' : ''}`} /></button>
               </div>
             </footer>
           </div>
         )}
+
+        {!showChat && (
+          <button onClick={() => setShowChat(true)} className="fixed lg:absolute bottom-12 right-12 w-20 h-20 bg-indigo-600 text-white rounded-[2.2rem] flex items-center justify-center shadow-[0_20px_50px_rgba(99,102,241,0.5)] hover:scale-110 active:scale-95 transition-all z-50 border border-white/10">
+            <ChatBubbleLeftRightIcon className="w-10 h-10" />
+          </button>
+        )}
       </main>
     </div>
   );
-
-  async function handleSendMessage() {
-    if (!userInput.trim()) return;
-    const msg: ChatMessage = { id: Date.now().toString(), role: 'user', text: userInput, timestamp: new Date() };
-    setMessages(prev => [...prev, msg]);
-    setUserInput('');
-    setIsChatting(true);
-    try {
-      const hist = messages.map(m => ({ role: m.role, parts: [{ text: m.text }] }));
-      const res = await geminiService.chat(msg.text, novelText, hist);
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: res, timestamp: new Date() }]);
-    } catch (e) {
-      addToast("AI Assistant unavailable", "error");
-    } finally {
-      setIsChatting(false);
-    }
-  }
 };
 
 export default App;
