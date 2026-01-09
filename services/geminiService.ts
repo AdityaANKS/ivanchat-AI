@@ -63,7 +63,7 @@ export const geminiService = {
         contents: {
           parts: [
             {
-              text: 'Minimalist square app icon for a luxury literary AI called "Ivanchat". Style: Deep indigo background with a single clean white geometric line-art symbol representing a stylized "I" and "V" merged. High-end tech aesthetic, soft glowing edges, flat vector design, no text, no chat bubbles, premium feel.',
+              text: 'A clean minimalist app icon for a literary platform. Design: A modern stylized "IV" logo in white lines. Background: Solid dark indigo. Professional, high-end tech aesthetic, square centered icon, no text.',
             },
           ],
         },
@@ -119,11 +119,11 @@ export const geminiService = {
       const toneDescription = toneList.join(' + ');
       const voiceName = gender === VoiceGender.FEMALE ? 'Kore' : 'Fenrir';
 
-      const prompt = `Act as a world-class narrator. Voice this text: "${text}". 
-      Emotion: ${toneDescription}. 
-      Pitch shift: ${pitch}%. 
-      Breaths: ${breaths ? 'included' : 'excluded'}. 
-      ${metadata ? `Pacing: ${metadata.pacing}, Mood: ${metadata.mood}.` : ''}`;
+      const prompt = `Act as a world-class audiobook narrator. Read this: "${text}". 
+      Emotional blend: ${toneDescription}. 
+      Vocal modulation: Pitch shift ${pitch}%. 
+      Breaths: ${breaths ? 'Natural/In-scene' : 'Minimized'}. 
+      Context: ${metadata ? `Mood: ${metadata.mood}, Pace: ${metadata.pacing}` : 'Standard narration'}.`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
@@ -181,12 +181,12 @@ export const geminiService = {
       const chatInstance = ai.chats.create({
         model: 'gemini-3-pro-preview',
         config: {
-          systemInstruction: `You are an expert literary analyzer. Novel Context: ${contextText.substring(0, 10000)}...\n\nCharacters:\n${charContext}`,
+          systemInstruction: `You are an expert literary analyzer. Context: ${contextText.substring(0, 10000)}...\nCharacters: ${charContext}`,
         },
         history
       });
       const response = await chatInstance.sendMessage({ message });
-      return response.text || "";
+      return response.text || "I am unable to process that literary query right now.";
     });
   }
 };
