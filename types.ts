@@ -1,6 +1,9 @@
+
 export enum ReadingTone {
   EMOTIONAL = 'Emotional',
   EMOTIONLESS = 'Emotionless',
+  COLD = 'Cold',
+  NATURAL = 'Natural',
   CALM = 'Calm',
   INTENSE = 'Intense',
   DRAMATIC = 'Dramatic',
@@ -10,7 +13,8 @@ export enum ReadingTone {
   MYSTERIOUS = 'Mysterious',
   ENERGETIC = 'Energetic',
   ROMANTIC = 'Romantic',
-  STERN = 'Stern'
+  STERN = 'Stern',
+  WHISPER = 'Whisper'
 }
 
 export enum VoiceGender {
@@ -47,25 +51,27 @@ export interface CharacterBio {
   mentions: number;
 }
 
-export interface VoicePreset {
-  id: string;
-  name: string;
-  tones: ReadingTone[];
-  gender: VoiceGender;
-  pitch: number;
-  includeBreaths: boolean;
-  speed: number;
-}
-
-export interface AudioState {
-  isPlaying: boolean;
-  speed: number;
-  progress: number;
-}
-
 export interface Chapter {
   id: string;
   title: string;
   content: string;
   startIndex: number;
+}
+
+export interface SentenceTimeline {
+  sentenceIndex: number;
+  globalIndex: number;
+  text: string;
+  audioStart: number;
+  audioEnd: number;
+  wordCount: number;
+}
+
+export interface AudioChunkMetadata {
+  chunkIndex: number;
+  charStart: number;
+  charEnd: number;
+  audioStart: number;
+  audioEnd: number;
+  sentences: SentenceTimeline[];
 }
