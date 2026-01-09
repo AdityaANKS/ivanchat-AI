@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Ivanchat: AI Literary Companion</title>
     <link rel="icon" type="image/png" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>✨</text></svg>">
     
@@ -17,19 +17,25 @@
       
       tailwind.config = {
         darkMode: 'class',
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'sans-serif'],
+              serif: ['Lora', 'serif'],
+            },
+          },
+        },
       }
     </script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Lora:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Lora:ital,wght@400;700&display=swap" rel="stylesheet">
     <style>
         body {
             font-family: 'Inter', sans-serif;
             background-color: #f8fafc;
+            overscroll-behavior-y: contain;
         }
         .dark body {
             background-color: #020617;
-        }
-        .font-serif {
-            font-family: 'Lora', serif;
         }
         .glass-panel {
             background: rgba(255, 255, 255, 0.8);
@@ -47,6 +53,11 @@
             -ms-overflow-style: none;
             scrollbar-width: none;
         }
+        /* Mobile height fix */
+        .h-screen-safe {
+            height: 100vh;
+            height: -webkit-fill-available;
+        }
     </style>
 <script type="importmap">
 {
@@ -63,7 +74,6 @@
 </head>
 <body>
     <div id="root"></div>
-    <!-- Using relative path to current directory to fix loading issues on custom domains -->
     <script type="module" src="./index.tsx"></script>
 </body>
 </html>

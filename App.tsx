@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { ReadingTone, VoiceGender, ChatMessage, CharacterBio, VoicePreset, ChatSession, SceneMetadata, Chapter } from './types.ts';
 import { geminiService } from './services/geminiService.ts';
-import { decodeBase64, decodeAudioData, floatTo16BitPCM, encodeBase64, audioBufferToWav, saveAudioToDB, getAudioFromDB } from './services/audioService.ts';
+import { decodeBase64, decodeAudioData, floatTo16BitPCM, encodeBase64, audioBufferToWav, audioBufferToMp4, saveAudioToDB, getAudioFromDB } from './services/audioService.ts';
 import { GoogleGenAI } from "@google/genai";
 import { 
   PlayIcon, 
@@ -28,7 +28,9 @@ import {
   EyeIcon,
   PencilSquareIcon,
   HashtagIcon,
-  ArrowDownOnSquareIcon
+  ArrowDownOnSquareIcon,
+  Bars3Icon,
+  VideoCameraIcon
 } from '@heroicons/react/24/outline';
 
 interface AudioChunkMetadata {
@@ -54,6 +56,8 @@ const App: React.FC = () => {
   const [userInput, setUserInput] = useState('');
   const [isChatting, setIsChatting] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isRenderingVideo, setIsRenderingVideo] = useState(false);
   
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const stored = localStorage.getItem('ivanchat_theme');
@@ -82,7 +86,7 @@ const App: React.FC = () => {
     setIsGeneratingBranding(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const prompt = "Generate a modern, minimal favicon for a web application named 'Ivanchat'. The favicon should be simple, clean, and highly recognizable at very small sizes, using a bold symbol rather than detailed text.";
+      const prompt = "Generate a modern, minimal favicon for a web application named 'Ivanchat'. The favicon should be simple, clean, and highly recognizable at very small sizes.";
       
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash-image',
@@ -223,7 +227,7 @@ const App: React.FC = () => {
     loadCachedAudio();
   }, [selectedChapterId]);
 
-  const [showChat, setShowChat] = useState(true);
+  const [showChat, setShowChat] = useState(false);
 
   // --- Text Processing ---
   const processedData = useMemo(() => {
@@ -239,6 +243,7 @@ const App: React.FC = () => {
       tokens.forEach(token => {
         const start = globalOffset + localOffset;
         const end = start + token.length;
+        // Trim tokens for words to avoid highlighting purely trailing whitespace
         if (token.trim().length > 0) words.push({ text: token, start, end });
         localOffset += token.length;
       });
@@ -247,6 +252,10 @@ const App: React.FC = () => {
     });
   }, [activeChapter]);
 
+  /**
+   * Refined Character Position Estimation.
+   * Leverages chunk metadata to handle linear interpolation drifts better.
+   */
   const estimatedCharPos = useMemo(() => {
     if (audioChunks.length === 0 || duration === 0 || !activeChapter) return 0;
     const chunk = audioChunks.find(c => currentTime >= c.audioStart && currentTime <= c.audioEnd);
@@ -336,8 +345,9 @@ const App: React.FC = () => {
       setIsGeneratingAudio(true);
       setGenProgress(0);
       initAudioContext();
+      setIsSidebarOpen(false);
       
-      const maxChunkChars = 1200;
+      const maxChunkChars = 800; // Smaller chunks for even better sync precision
       const textChunks: { text: string; start: number; end: number }[] = [];
       let currentChunkText = "";
       let currentStart = 0;
@@ -359,16 +369,13 @@ const App: React.FC = () => {
       for (let i = 0; i < textChunks.length; i++) {
         const chunk = textChunks[i];
         const sceneMeta = await geminiService.analyzeScene(chunk.text);
-        // Using the definitive geminiService in services/geminiService.ts
         const base64 = await geminiService.textToSpeech(chunk.text, selectedTones, gender, pitch, includeBreaths, sceneMeta);
         const bytes = decodeBase64(base64);
         const buffer = await decodeAudioData(bytes, audioContextRef.current!, 24000, 1);
         
         results.push({ buffer, chunk, sceneMeta });
         setGenProgress(((i + 1) / textChunks.length) * 100);
-        
-        // Brief delay to let the environment settle between API requests
-        await new Promise(resolve => setTimeout(resolve, 150));
+        await new Promise(resolve => setTimeout(resolve, 250));
       }
       
       const totalSamples = results.reduce((acc, r) => acc + r.buffer.length, 0);
@@ -406,7 +413,7 @@ const App: React.FC = () => {
       setTimeout(() => setIsGeneratingAudio(false), 800);
     } catch (e) {
       console.error(e);
-      alert("An error occurred during synthesis. Please ensure your manuscript is formatted correctly and try again.");
+      alert("An error occurred during synthesis.");
       setIsGeneratingAudio(false);
     }
   };
@@ -439,6 +446,25 @@ const App: React.FC = () => {
     a.download = `Ivanchat_${(activeChapter?.title || 'Audiobook').replace(/\s+/g, '_')}.wav`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleExportMp4 = async () => {
+    if (!currentAudioBufferRef.current) return;
+    setIsRenderingVideo(true);
+    try {
+      const blob = await audioBufferToMp4(currentAudioBufferRef.current, activeChapter?.title || 'Untitled', appIcon);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Ivanchat_${(activeChapter?.title || 'Audiobook').replace(/\s+/g, '_')}.webm`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e);
+      alert("Video rendering failed.");
+    } finally {
+      setIsRenderingVideo(false);
+    }
   };
 
   const handleSavePreset = () => {
@@ -541,26 +567,50 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="flex h-screen bg-slate-50 dark:bg-slate-950 overflow-hidden text-slate-900 dark:text-slate-100 font-sans transition-colors duration-500">
+    <div className="flex h-screen-safe bg-slate-50 dark:bg-slate-950 overflow-hidden text-slate-900 dark:text-slate-100 font-sans transition-colors duration-500 relative">
+      
+      {/* RENDER OVERLAY */}
+      {isRenderingVideo && (
+        <div className="fixed inset-0 z-[100] bg-slate-900/80 backdrop-blur-xl flex flex-col items-center justify-center text-white p-8">
+           <div className="w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center animate-spin mb-6">
+             <VideoCameraIcon className="w-10 h-10 text-white" />
+           </div>
+           <h2 className="text-2xl font-bold mb-2">Rendering Video...</h2>
+           <p className="text-slate-400 text-center max-w-sm">Combining narrations and visuals. This may take a few moments based on chapter length.</p>
+        </div>
+      )}
+
+      {/* MOBILE OVERLAY */}
+      {isSidebarOpen && (
+        <div 
+          className="fixed inset-0 bg-black/50 z-30 lg:hidden transition-opacity duration-300" 
+          onClick={() => setIsSidebarOpen(false)}
+        />
+      )}
+
       {/* SIDEBAR */}
-      <aside className="w-80 border-r dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col shadow-sm z-10 shrink-0">
+      <aside className={`
+        fixed inset-y-0 left-0 z-40 w-[280px] sm:w-[320px] bg-white dark:bg-slate-900 border-r dark:border-slate-800 shadow-2xl transition-transform duration-300 transform 
+        lg:translate-x-0 lg:static lg:block lg:shadow-none
+        ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+       flex flex-col shrink-0`}>
         <div className="p-6 border-b dark:border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
             {appIcon ? (
-              <img src={appIcon} alt="Ivanchat Logo" className="w-10 h-10 rounded-xl shadow-sm transition-transform" />
+              <img src={appIcon} alt="Ivanchat Logo" className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl shadow-sm transition-transform" />
             ) : (
-              <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center animate-pulse">
-                <SparklesIcon className="w-6 h-6 text-white" />
+              <div className="w-8 h-8 sm:w-10 sm:h-10 bg-indigo-600 rounded-xl flex items-center justify-center animate-pulse">
+                <SparklesIcon className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
               </div>
             )}
-            <h1 className="text-xl font-bold tracking-tight">Ivanchat</h1>
+            <h1 className="text-lg sm:text-xl font-bold tracking-tight">Ivanchat</h1>
           </div>
           <button onClick={() => setIsDarkMode(!isDarkMode)} className="p-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:text-indigo-600 transition-all">
             {isDarkMode ? <SunIcon className="w-5 h-5" /> : <MoonIcon className="w-5 h-5" />}
           </button>
         </div>
 
-        <div className="p-6 flex-1 overflow-y-auto space-y-8 scrollbar-hide">
+        <div className="p-4 sm:p-6 flex-1 overflow-y-auto space-y-8 scrollbar-hide">
           {isGeneratingBranding && (
             <div className="flex items-center gap-3 p-3 bg-indigo-50 dark:bg-indigo-900/20 rounded-xl border border-indigo-100 dark:border-indigo-800 animate-pulse">
               <ArrowPathIcon className="w-4 h-4 text-indigo-600 animate-spin" />
@@ -589,27 +639,6 @@ const App: React.FC = () => {
             </div>
           </section>
 
-          {/* CHAT HISTORY */}
-          <section>
-            <div className="flex items-center gap-2 mb-4 text-slate-400 font-bold uppercase text-[10px] tracking-widest">
-              <ArchiveBoxIcon className="w-4 h-4" /> Chat History
-            </div>
-            <div className="space-y-1 max-h-32 overflow-y-auto scrollbar-hide">
-              {chatSessions.length === 0 ? (
-                <div className="text-[10px] text-center p-4 border border-dashed rounded-lg opacity-40 italic">No saved sessions</div>
-              ) : (
-                chatSessions.map((s) => (
-                  <div key={s.id} className="group flex items-center justify-between bg-slate-50 dark:bg-slate-800 p-2 rounded-xl border dark:border-slate-800 hover:border-indigo-400 transition-all">
-                    <button onClick={() => handleLoadChat(s)} className="flex-1 text-left text-[11px] font-medium truncate px-2">{s.name}</button>
-                    <button onClick={(e) => handleDeleteChat(s.id, e)} className="p-1 text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <TrashIcon className="w-3 h-3" />
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
-
           {/* CHAPTERS */}
           <section>
             <div className="flex items-center gap-2 mb-4 text-slate-400 font-bold uppercase text-[10px] tracking-widest">
@@ -619,7 +648,7 @@ const App: React.FC = () => {
               {chapters.map((ch) => (
                 <button 
                   key={ch.id} 
-                  onClick={() => setSelectedChapterId(ch.id)}
+                  onClick={() => { setSelectedChapterId(ch.id); setIsSidebarOpen(false); }}
                   className={`w-full text-left px-3 py-2 rounded-xl text-xs transition-all flex items-center gap-3 ${selectedChapterId === ch.id ? 'bg-indigo-600 text-white shadow-lg' : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}`}
                 >
                   <span className="opacity-50 font-mono">#{ch.id.split('-')[1] || '0'}</span>
@@ -641,7 +670,7 @@ const App: React.FC = () => {
             </div>
             <div className="space-y-2">
               {characters.length === 0 ? (
-                <div className="text-[10px] text-center p-4 border border-dashed rounded-lg opacity-40 italic">Scan manuscript for bios...</div>
+                <div className="text-[10px] text-center p-4 border border-dashed rounded-lg opacity-40 italic">Scan for bios...</div>
               ) : (
                 characters.slice(0, 4).map((c, i) => (
                   <div key={i} className="group relative bg-slate-50 dark:bg-slate-800/50 p-3 rounded-xl border dark:border-slate-800 hover:border-indigo-400 transition-all">
@@ -653,37 +682,6 @@ const App: React.FC = () => {
                   </div>
                 ))
               )}
-            </div>
-          </section>
-
-          {/* NARRATIVE PRESETS */}
-          <section>
-            <div className="flex items-center gap-2 mb-4 text-slate-400 font-bold uppercase text-[10px] tracking-widest">
-              <BookmarkIcon className="w-4 h-4" /> Narrative Presets
-            </div>
-            <div className="space-y-3">
-              <div className="flex gap-2">
-                <input 
-                  type="text" 
-                  value={presetNameInput} 
-                  onChange={e => setPresetNameInput(e.target.value)} 
-                  placeholder="Profile Name..." 
-                  className="flex-1 text-[10px] bg-slate-50 dark:bg-slate-800 border dark:border-slate-800 rounded-lg px-2 py-2 outline-none focus:ring-1 ring-indigo-500" 
-                />
-                <button onClick={handleSavePreset} title="Save current settings" disabled={!presetNameInput.trim()} className="bg-indigo-600 text-white p-2 rounded-lg disabled:opacity-30">
-                  <PlusIcon className="w-4 h-4" />
-                </button>
-              </div>
-              <div className="grid grid-cols-1 gap-1 max-h-32 overflow-y-auto scrollbar-hide">
-                {presets.map(p => (
-                  <div key={p.id} className="flex items-center justify-between bg-white dark:bg-slate-800 p-2 rounded-xl border dark:border-slate-800 group hover:border-indigo-400 transition-all">
-                    <button onClick={() => handleLoadPreset(p)} className="flex-1 text-left text-[11px] font-medium truncate px-2">{p.name}</button>
-                    <button onClick={() => setPresets(prev => prev.filter(x => x.id !== p.id))} className="p-1 text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <TrashIcon className="w-3 h-3" />
-                    </button>
-                  </div>
-                ))}
-              </div>
             </div>
           </section>
 
@@ -715,7 +713,7 @@ const App: React.FC = () => {
                 <button 
                   key={t} 
                   onClick={() => setSelectedTones(prev => prev.includes(t) ? (prev.length > 1 ? prev.filter(x => x !== t) : prev) : [...prev, t])} 
-                  className={`px-2 py-1.5 rounded-lg text-[10px] border transition-all ${selectedTones.includes(t) ? 'bg-indigo-600 border-indigo-600 text-white shadow-md' : 'border-slate-200 dark:border-slate-800 text-slate-400 hover:border-indigo-300'}`}
+                  className={`px-2 py-2 rounded-lg text-[10px] border transition-all ${selectedTones.includes(t) ? 'bg-indigo-600 border-indigo-600 text-white shadow-md' : 'border-slate-200 dark:border-slate-800 text-slate-400 hover:border-indigo-300'}`}
                 >
                   {t}
                 </button>
@@ -742,7 +740,7 @@ const App: React.FC = () => {
             </div>
           </section>
 
-          <section>
+          <section className="pb-8 lg:pb-0">
             <button 
               onClick={startSynthesis} 
               disabled={isGeneratingAudio} 
@@ -756,16 +754,31 @@ const App: React.FC = () => {
       </aside>
 
       {/* MAIN PANEL */}
-      <main className="flex-1 flex flex-col relative min-w-0 transition-colors duration-500">
+      <main className="flex-1 flex flex-col relative min-w-0 transition-colors duration-500 overflow-hidden">
+        
+        {/* MOBILE HEADER */}
+        <header className="lg:hidden p-4 border-b dark:border-slate-800 bg-white dark:bg-slate-950 flex items-center justify-between z-20 shrink-0">
+          <button onClick={() => setIsSidebarOpen(true)} className="p-2 rounded-xl bg-slate-100 dark:bg-slate-800">
+            <Bars3Icon className="w-6 h-6" />
+          </button>
+          <div className="flex items-center gap-2">
+            {appIcon && <img src={appIcon} alt="Logo" className="w-6 h-6 rounded-lg" />}
+            <span className="font-bold text-sm">Ivanchat</span>
+          </div>
+          <button onClick={() => setShowChat(!showChat)} className={`p-2 rounded-xl transition-colors ${showChat ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800'}`}>
+            <ChatBubbleLeftRightIcon className="w-6 h-6" />
+          </button>
+        </header>
+
         <div 
           className="flex-1 overflow-y-auto p-4 sm:p-8 lg:p-12 scrollbar-hide" 
           ref={scrollContainerRef}
         >
-          <div className="max-w-4xl mx-auto space-y-8">
-            <header className="flex justify-between items-center border-b dark:border-slate-800 pb-6">
+          <div className="max-w-4xl mx-auto space-y-6 sm:space-y-8">
+            <header className="hidden lg:flex justify-between items-center border-b dark:border-slate-800 pb-6">
               <div className="flex items-center gap-6">
                 {appIcon && (
-                  <div className="hidden sm:block">
+                  <div>
                     <img src={appIcon} alt="Ivanchat Logo" className="w-16 h-16 rounded-2xl shadow-xl border-4 border-white dark:border-slate-800" />
                   </div>
                 )}
@@ -775,7 +788,7 @@ const App: React.FC = () => {
                 </div>
               </div>
               <div className="flex items-center gap-6">
-                <div className="hidden md:flex items-center gap-2 px-3 py-1 bg-slate-100 dark:bg-slate-800 rounded-full text-[10px] font-bold text-slate-400 uppercase">
+                <div className="flex items-center gap-2 px-3 py-1 bg-slate-100 dark:bg-slate-800 rounded-full text-[10px] font-bold text-slate-400 uppercase">
                   <ClockIcon className="w-3 h-3" />
                   <span>{(activeChapter?.content || '').trim().split(/\s+/).filter(x => x.length > 0).length} Words</span>
                 </div>
@@ -783,14 +796,28 @@ const App: React.FC = () => {
               </div>
             </header>
 
-            <article className="min-h-[70vh]">
+            <article className="min-h-[70vh] pb-32 lg:pb-0">
               {viewMode === 'reader' && duration > 0 && (
-                <div className="sticky top-0 z-20 py-4 bg-slate-50/80 dark:bg-slate-950/80 backdrop-blur-md mb-8">
-                   <div className="flex items-center gap-4">
-                      <button onClick={togglePlayback} className="p-3 bg-indigo-600 text-white rounded-full shadow-lg hover:scale-105 transition-transform active:scale-95">
-                        {isAudioPlaying ? <PauseIcon className="w-6 h-6" /> : <PlayIcon className="w-6 h-6" />}
-                      </button>
-                      <div className="flex-1 space-y-1">
+                <div className="sticky top-0 lg:top-0 z-20 py-4 bg-slate-50/90 dark:bg-slate-950/90 backdrop-blur-md mb-8">
+                   <div className="flex flex-col sm:flex-row items-center gap-4">
+                      <div className="flex items-center gap-4 w-full sm:w-auto">
+                        <button onClick={togglePlayback} className="p-4 bg-indigo-600 text-white rounded-full shadow-lg hover:scale-105 transition-transform active:scale-95 shrink-0">
+                          {isAudioPlaying ? <PauseIcon className="w-6 h-6" /> : <PlayIcon className="w-6 h-6" />}
+                        </button>
+                        <div className="sm:hidden flex-1 space-y-1">
+                           <div className="flex justify-between text-[9px] font-mono font-bold text-slate-400">
+                            <span>{new Date(currentTime * 1000).toISOString().substr(14, 5)}</span>
+                            <span>{new Date(duration * 1000).toISOString().substr(14, 5)}</span>
+                          </div>
+                          <input type="range" min="0" max={duration} step="0.1" value={currentTime} onChange={e => {
+                            const val = parseFloat(e.target.value);
+                            setCurrentTime(val);
+                            pausedTimeRef.current = val;
+                            if (isAudioPlaying) playBuffer(currentAudioBufferRef.current!, val);
+                          }} className="w-full h-1 accent-indigo-600 bg-slate-200 dark:bg-slate-800 rounded-full appearance-none cursor-pointer" />
+                        </div>
+                      </div>
+                      <div className="hidden sm:block flex-1 space-y-1">
                         <div className="flex justify-between text-[9px] font-mono font-bold text-slate-400">
                           <span>{new Date(currentTime * 1000).toISOString().substr(14, 5)}</span>
                           <span>{new Date(duration * 1000).toISOString().substr(14, 5)}</span>
@@ -802,10 +829,10 @@ const App: React.FC = () => {
                           if (isAudioPlaying) playBuffer(currentAudioBufferRef.current!, val);
                         }} className="w-full h-1 accent-indigo-600 bg-slate-200 dark:bg-slate-800 rounded-full appearance-none cursor-pointer" />
                       </div>
-                      <div className="flex items-center gap-2">
-                         <div className="flex items-center gap-2 px-3 py-1.5 bg-white dark:bg-slate-800 rounded-xl border dark:border-slate-700 shadow-sm">
+                      <div className="flex items-center justify-between w-full sm:w-auto gap-4">
+                         <div className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-slate-800 rounded-xl border dark:border-slate-700 shadow-sm flex-1 sm:flex-none justify-center">
                             <SpeakerWaveIcon className="w-4 h-4 text-slate-400" />
-                            <select value={audioSpeed} onChange={e => setAudioSpeed(parseFloat(e.target.value))} className="bg-transparent text-[10px] font-bold outline-none border-none cursor-pointer">
+                            <select value={audioSpeed} onChange={e => setAudioSpeed(parseFloat(e.target.value))} className="bg-transparent text-xs font-bold outline-none border-none cursor-pointer">
                                <option value="0.75">0.75x</option>
                                <option value="1.0">1.0x</option>
                                <option value="1.25">1.25x</option>
@@ -813,13 +840,22 @@ const App: React.FC = () => {
                                <option value="2.0">2.0x</option>
                             </select>
                          </div>
-                         <button 
-                           onClick={handleExportWav} 
-                           title="Export as .WAV"
-                           className="p-2 bg-slate-100 dark:bg-slate-800 rounded-xl hover:text-indigo-600 transition-colors"
-                         >
-                           <ArrowDownOnSquareIcon className="w-5 h-5" />
-                         </button>
+                         <div className="flex gap-2">
+                            <button 
+                              onClick={handleExportWav} 
+                              title="Export as .WAV"
+                              className="p-3 bg-slate-100 dark:bg-slate-800 rounded-xl hover:text-indigo-600 transition-colors"
+                            >
+                              <ArrowDownOnSquareIcon className="w-5 h-5" />
+                            </button>
+                            <button 
+                              onClick={handleExportMp4} 
+                              title="Export as Video (MP4/WebM)"
+                              className="p-3 bg-slate-100 dark:bg-slate-800 rounded-xl hover:text-indigo-600 transition-colors"
+                            >
+                              <VideoCameraIcon className="w-5 h-5" />
+                            </button>
+                         </div>
                       </div>
                    </div>
                 </div>
@@ -830,14 +866,14 @@ const App: React.FC = () => {
                   value={novelText} 
                   onChange={e => setNovelText(e.target.value)} 
                   placeholder="Paste or write your novel content here..." 
-                  className="w-full h-[75vh] p-8 sm:p-12 bg-white dark:bg-slate-900 rounded-[2rem] shadow-xl border-none focus:ring-4 focus:ring-indigo-600/5 font-serif text-xl leading-relaxed resize-none scrollbar-hide" 
+                  className="w-full h-[60vh] sm:h-[75vh] p-6 sm:p-12 bg-white dark:bg-slate-900 rounded-[1.5rem] sm:rounded-[2rem] shadow-xl border-none focus:ring-4 focus:ring-indigo-600/5 font-serif text-lg sm:text-xl leading-relaxed resize-none scrollbar-hide" 
                 />
               ) : (
-                <div className="w-full min-h-[75vh] p-8 sm:p-12 bg-white dark:bg-slate-900 rounded-[2rem] shadow-xl font-serif text-xl leading-relaxed text-slate-800 dark:text-slate-100 whitespace-pre-wrap">
+                <div className="w-full min-h-[60vh] sm:min-h-[75vh] p-6 sm:p-12 bg-white dark:bg-slate-900 rounded-[1.5rem] sm:rounded-[2rem] shadow-xl font-serif text-lg sm:text-xl leading-relaxed text-slate-800 dark:text-slate-100 whitespace-pre-wrap selection:bg-indigo-600 selection:text-white">
                   {processedData.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-40 opacity-10">
-                      <BookOpenIcon className="w-24 h-24 mb-4" />
-                      <p className="font-sans font-bold uppercase tracking-widest">Library is Empty</p>
+                      <BookOpenIcon className="w-16 sm:w-24 h-16 sm:h-24 mb-4" />
+                      <p className="font-sans font-bold uppercase tracking-widest text-xs sm:text-base">Library is Empty</p>
                     </div>
                   ) : (
                     processedData.map((s, si) => (
@@ -845,7 +881,11 @@ const App: React.FC = () => {
                         {s.words.map((w, wi) => {
                           const isWordActive = si === activeIndices.activeSentenceIdx && wi === activeIndices.activeWordIdx;
                           return (
-                            <span key={wi} ref={isWordActive ? activeWordRef : null} className={`inline-block px-0.5 rounded transition-all duration-300 ${isWordActive ? 'bg-indigo-600 text-white shadow-lg' : 'opacity-100'}`}>
+                            <span 
+                              key={wi} 
+                              ref={isWordActive ? activeWordRef : null} 
+                              className={`inline-block px-1 rounded transition-all duration-200 ${isWordActive ? 'bg-indigo-600 text-white shadow-[0_4px_20px_rgba(79,70,229,0.4)] scale-110' : 'opacity-100'}`}
+                            >
                               {w.text}{' '}
                             </span>
                           );
@@ -859,38 +899,41 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* CHATBOT */}
+        {/* CHATBOT WINDOW */}
         {showChat && (
-          <div className="absolute bottom-10 right-10 w-[420px] h-[650px] flex flex-col glass-panel rounded-[2.5rem] shadow-[0_50px_100px_-20px_rgba(0,0,0,0.2)] overflow-hidden border border-white dark:border-slate-800 transition-all z-50">
-            <header className="p-8 bg-indigo-600 text-white flex justify-between items-center relative overflow-hidden group shrink-0">
+          <div className={`
+            fixed lg:absolute bottom-0 right-0 z-50 flex flex-col glass-panel shadow-2xl transition-all duration-300
+            w-full lg:w-[420px] h-[90vh] lg:h-[650px]
+            lg:bottom-10 lg:right-10 lg:rounded-[2.5rem] lg:border rounded-t-[2.5rem]
+            ${showChat ? 'translate-y-0 opacity-100' : 'translate-y-full opacity-0 pointer-events-none'}
+          `}>
+            <header className="p-6 lg:p-8 bg-indigo-600 text-white flex justify-between items-center relative overflow-hidden shrink-0">
               <div className="flex items-center gap-4 relative z-10">
                 {appIcon ? (
                   <img src={appIcon} alt="Logo" className="w-8 h-8 rounded-lg brightness-110" />
                 ) : (
                   <ChatBubbleLeftRightIcon className="w-8 h-8" />
                 )}
-                <h3 className="font-bold text-lg tracking-tight">Literary Expert</h3>
+                <h3 className="font-bold text-base lg:text-lg tracking-tight">Literary Expert</h3>
               </div>
               <div className="flex gap-2 relative z-10">
-                <button onClick={() => setMessages([])} title="New Chat" className="bg-white/10 p-2 rounded-2xl hover:bg-white/20 transition-colors"><PlusIcon className="w-5 h-5" /></button>
-                <button onClick={handleSaveChat} title="Archive Session" className="bg-white/10 p-2 rounded-2xl hover:bg-white/20 transition-colors"><ArrowDownTrayIcon className="w-5 h-5" /></button>
+                <button onClick={handleSaveChat} title="Archive Session" className="bg-white/10 p-2 rounded-2xl hover:bg-white/20 transition-colors hidden lg:block"><ArrowDownTrayIcon className="w-5 h-5" /></button>
                 <button onClick={() => setShowChat(false)} className="bg-white/10 p-2 rounded-2xl hover:bg-white/20 transition-colors"><XMarkIcon className="w-5 h-5" /></button>
               </div>
             </header>
 
-            <div className="flex-1 overflow-y-auto p-8 space-y-6 scrollbar-hide bg-white/40 dark:bg-slate-900/40 backdrop-blur-3xl">
+            <div className="flex-1 overflow-y-auto p-6 lg:p-8 space-y-6 scrollbar-hide bg-white/40 dark:bg-slate-900/40 backdrop-blur-3xl">
               {messages.length === 0 && (
-                <div className="text-center py-20 space-y-4 opacity-30">
-                  <div className="w-16 h-16 bg-indigo-50 dark:bg-indigo-900/20 rounded-full flex items-center justify-center mx-auto">
-                    <ChatBubbleLeftRightIcon className="w-8 h-8 text-indigo-400" />
+                <div className="text-center py-10 lg:py-20 space-y-4 opacity-30">
+                  <div className="w-12 h-12 lg:w-16 lg:h-16 bg-indigo-50 dark:bg-indigo-900/20 rounded-full flex items-center justify-center mx-auto">
+                    <ChatBubbleLeftRightIcon className="w-6 h-6 lg:w-8 lg:h-8 text-indigo-400" />
                   </div>
-                  <p className="text-xs font-bold uppercase tracking-widest">Analysis Engine Active</p>
-                  <p className="text-[10px] italic max-w-[180px] mx-auto">Ask about plot or characters.</p>
+                  <p className="text-[10px] lg:text-xs font-bold uppercase tracking-widest">Analysis Engine Active</p>
                 </div>
               )}
               {messages.map((m) => (
                 <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] p-5 rounded-[2rem] text-sm leading-relaxed shadow-sm ${m.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-tl-none text-slate-700 dark:text-slate-200'}`}>
+                  <div className={`max-w-[90%] lg:max-w-[85%] p-4 lg:p-5 rounded-[1.5rem] lg:rounded-[2rem] text-sm leading-relaxed shadow-sm ${m.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-tl-none text-slate-700 dark:text-slate-200'}`}>
                     {m.text}
                   </div>
                 </div>
@@ -900,41 +943,41 @@ const App: React.FC = () => {
                    <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
                    <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
                    <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" />
-                   <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-2">Consulting Manuscript</span>
                 </div>
               )}
             </div>
 
-            <footer className="p-6 bg-white/90 dark:bg-slate-900/90 border-t dark:border-slate-800 backdrop-blur-md shrink-0">
-              <div className="flex gap-3">
+            <footer className="p-4 lg:p-6 bg-white/95 dark:bg-slate-900/95 border-t dark:border-slate-800 backdrop-blur-md shrink-0 mb-safe">
+              <div className="flex gap-2 sm:gap-3">
                 <input 
                   type="text" 
                   value={userInput} 
                   onChange={e => setUserInput(e.target.value)} 
                   onKeyDown={e => e.key === 'Enter' && handleSendMessage()} 
                   placeholder="Ask about your story..." 
-                  className="flex-1 px-6 py-4 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-[1.8rem] outline-none text-sm placeholder:italic focus:ring-2 ring-indigo-500/20" 
+                  className="flex-1 px-4 lg:px-6 py-3 lg:py-4 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-[1.5rem] lg:rounded-[1.8rem] outline-none text-sm placeholder:italic focus:ring-2 ring-indigo-500/20" 
                 />
                 <button 
                   onClick={handleVoiceCommand} 
-                  className={`p-4 rounded-full transition-all ${isTranscribing ? 'bg-red-500 text-white animate-pulse' : 'bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-indigo-600'}`}
+                  className={`p-3 lg:p-4 rounded-full transition-all ${isTranscribing ? 'bg-red-500 text-white animate-pulse' : 'bg-slate-100 dark:bg-slate-800 text-slate-400'}`}
                 >
-                  <MicrophoneIcon className="w-6 h-6" />
+                  <MicrophoneIcon className="w-5 h-5 lg:w-6 lg:h-6" />
                 </button>
                 <button 
                   onClick={handleSendMessage} 
                   disabled={isChatting || !userInput.trim()} 
-                  className="bg-indigo-600 text-white p-4 rounded-full shadow-lg shadow-indigo-600/20 hover:scale-110 active:scale-95 transition-all disabled:opacity-30"
+                  className="bg-indigo-600 text-white p-3 lg:p-4 rounded-full shadow-lg shadow-indigo-600/20 hover:scale-105 active:scale-95 transition-all disabled:opacity-30"
                 >
-                  <ArrowPathIcon className={`w-6 h-6 ${isChatting ? 'animate-spin' : ''}`} />
+                  <ArrowPathIcon className={`w-5 h-5 lg:w-6 lg:h-6 ${isChatting ? 'animate-spin' : ''}`} />
                 </button>
               </div>
             </footer>
           </div>
         )}
 
+        {/* CHAT TOGGLE BUTTON (DESKTOP) */}
         {!showChat && (
-          <button onClick={() => setShowChat(true)} className="absolute bottom-12 right-12 w-16 h-16 bg-indigo-600 text-white rounded-[2rem] flex items-center justify-center shadow-2xl hover:scale-110 active:scale-95 transition-all z-50">
+          <button onClick={() => setShowChat(true)} className="hidden lg:flex absolute bottom-12 right-12 w-16 h-16 bg-indigo-600 text-white rounded-[2rem] items-center justify-center shadow-2xl hover:scale-110 active:scale-95 transition-all z-50">
             <ChatBubbleLeftRightIcon className="w-8 h-8" />
           </button>
         )}

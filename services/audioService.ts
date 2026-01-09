@@ -1,4 +1,3 @@
-
 export function decodeBase64(base64: string): Uint8Array {
   try {
     if (!base64 || typeof base64 !== 'string') return new Uint8Array(0);
@@ -53,6 +52,9 @@ export function floatTo16BitPCM(data: Float32Array): Uint8Array {
   return new Uint8Array(int16.buffer);
 }
 
+/**
+ * Enhanced WAV exporter with strict RIFF header compliance.
+ */
 export function audioBufferToWav(buffer: AudioBuffer): Blob {
   const numChannels = buffer.numberOfChannels;
   const sampleRate = buffer.sampleRate;
@@ -76,18 +78,31 @@ export function audioBufferToWav(buffer: AudioBuffer): Blob {
     }
   };
 
+  /* RIFF identifier */
   writeString(0, 'RIFF');
+  /* file length */
   view.setUint32(4, totalSize - 8, true);
+  /* RIFF type */
   writeString(8, 'WAVE');
+  /* format chunk identifier */
   writeString(12, 'fmt ');
+  /* format chunk length */
   view.setUint32(16, 16, true);
+  /* sample format (raw) */
   view.setUint16(20, format, true);
+  /* channel count */
   view.setUint16(22, numChannels, true);
+  /* sample rate */
   view.setUint32(24, sampleRate, true);
+  /* byte rate (sample rate * block align) */
   view.setUint32(28, sampleRate * blockAlign, true);
+  /* block align (channel count * bytes per sample) */
   view.setUint16(32, blockAlign, true);
+  /* bits per sample */
   view.setUint16(34, bitDepth, true);
+  /* data chunk identifier */
   writeString(36, 'data');
+  /* data chunk length */
   view.setUint32(40, dataSize, true);
 
   const offset = 44;
@@ -100,14 +115,87 @@ export function audioBufferToWav(buffer: AudioBuffer): Blob {
   for (let i = 0; i < bufferLength; i++) {
     for (let channel = 0; channel < numChannels; channel++) {
       let sample = channelData[channel][i];
+      // Clamping and normalization for valid Int16 PCM
       sample = Math.max(-1, Math.min(1, sample));
-      sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+      sample = sample < 0 ? sample * 32768 : sample * 32767;
       view.setInt16(offset + index, sample, true);
       index += 2;
     }
   }
 
   return new Blob([arrayBuffer], { type: 'audio/wav' });
+}
+
+/**
+ * Advanced MP4/WebM Video exporter.
+ * Captures a static frame (App Icon/Title) and combines it with the AudioBuffer.
+ */
+export async function audioBufferToMp4(buffer: AudioBuffer, title: string, iconUrl?: string | null): Promise<Blob> {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1280;
+  canvas.height = 720;
+  const ctx = canvas.getContext('2d')!;
+
+  // Background
+  ctx.fillStyle = '#0f172a'; // Dark blue-slate
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Gradient Overlay
+  const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+  grad.addColorStop(0, 'rgba(79, 70, 229, 0.2)');
+  grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Draw Icon if available
+  if (iconUrl) {
+    const img = new Image();
+    img.src = iconUrl;
+    await new Promise((resolve) => { img.onload = resolve; });
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(canvas.width / 2 - 100, canvas.height / 2 - 180, 200, 200, 40);
+    ctx.clip();
+    ctx.drawImage(img, canvas.width / 2 - 100, canvas.height / 2 - 180, 200, 200);
+    ctx.restore();
+  }
+
+  // Draw Text
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 48px Inter, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Ivanchat Narrator', canvas.width / 2, canvas.height / 2 + 80);
+  
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '32px Inter, sans-serif';
+  ctx.fillText(title, canvas.width / 2, canvas.height / 2 + 130);
+
+  // Capture Stream
+  const stream = canvas.captureStream(1); // 1 FPS for static video
+  const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  const dest = audioCtx.createMediaStreamDestination();
+  source.connect(dest);
+  
+  stream.addTrack(dest.stream.getAudioTracks()[0]);
+
+  return new Promise((resolve, reject) => {
+    const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8,opus' });
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (e) => chunks.push(e.data);
+    recorder.onstop = () => resolve(new Blob(chunks, { type: 'video/webm' }));
+    recorder.onerror = reject;
+    
+    recorder.start();
+    source.start(0);
+    
+    // Stop recording once audio finishes
+    source.onended = () => {
+      recorder.stop();
+      audioCtx.close();
+    };
+  });
 }
 
 // --- IndexedDB Persistence ---
