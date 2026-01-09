@@ -1,16 +1,56 @@
 import { GoogleGenAI, Modality, Type } from "@google/genai";
 import { ReadingTone, VoiceGender, CharacterBio, SceneMetadata } from "../types.ts";
 
-// Always use process.env.API_KEY directly as per guidelines
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Support for multiple keys with rotation/fallback logic
+const keys = [
+  process.env.API_KEY,
+  (process.env as any).GEMINI_API_KEY,
+  (process.env as any).GEMINI_API_KEY_2,
+  (process.env as any).GEMINI_API_KEY_3
+].filter(Boolean) as string[];
+
+let currentKeyIndex = 0;
+
+/**
+ * Returns a new GoogleGenAI instance using the current active key.
+ */
+function getAIClient() {
+  const apiKey = keys.length > 0 ? keys[currentKeyIndex] : process.env.API_KEY!;
+  return new GoogleGenAI({ apiKey });
+}
+
+/**
+ * Executes an AI operation with automatic key rotation on failure.
+ */
+async function withFallback<T>(operation: (ai: ReturnType<typeof getAIClient>) => Promise<T>): Promise<T> {
+  let lastError;
+  const attempts = Math.max(1, keys.length);
+
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const ai = getAIClient();
+      return await operation(ai);
+    } catch (e: any) {
+      console.warn(`Gemini API Error with key ${currentKeyIndex}. Attempting rotation.`, e);
+      lastError = e;
+      // Rotate to next key if we have multiple
+      if (keys.length > 1) {
+        currentKeyIndex = (currentKeyIndex + 1) % keys.length;
+      } else {
+        // If only one key, don't loop endlessly
+        throw e;
+      }
+    }
+  }
+  throw lastError;
+}
 
 export const geminiService = {
   /**
    * Analyzes a specific chunk of text to extract narrative metadata.
-   * Uses gemini-3-flash-preview for efficient analysis.
    */
   async analyzeScene(text: string): Promise<SceneMetadata> {
-    try {
+    return withFallback(async (ai) => {
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: `Analyze this scene for a high-end audiobook production. Identify the dominant mood, the ideal narration pacing, present characters, and key phrases that require specific emphasis.
@@ -22,10 +62,10 @@ export const geminiService = {
           responseSchema: {
             type: Type.OBJECT,
             properties: {
-              mood: { type: Type.STRING, description: "The overarching emotional atmosphere." },
-              pacing: { type: Type.STRING, enum: ["fast", "slow", "moderate"], description: "The recommended speed of narration." },
-              keyCharacters: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Characters actively present or discussed." },
-              keyPhrases: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Phrases that carry significant narrative weight." }
+              mood: { type: Type.STRING },
+              pacing: { type: Type.STRING, enum: ["fast", "slow", "moderate"] },
+              keyCharacters: { type: Type.ARRAY, items: { type: Type.STRING } },
+              keyPhrases: { type: Type.ARRAY, items: { type: Type.STRING } }
             },
             required: ["mood", "pacing", "keyCharacters", "keyPhrases"]
           }
@@ -34,18 +74,14 @@ export const geminiService = {
 
       if (!response.text) throw new Error("Empty response from analysis model.");
       return JSON.parse(response.text.trim());
-    } catch (e) {
-      console.error("Failed to parse scene metadata:", e);
-      return { mood: "neutral", pacing: "moderate", keyCharacters: [], keyPhrases: [] };
-    }
+    });
   },
 
   /**
-   * Generates highly expressive narrator audio using gemini-2.5-flash-preview-tts.
-   * Leverages a sophisticated tone-blending algorithm for vocal performance.
+   * Generates highly expressive narrator audio.
    */
   async textToSpeech(text: string, tones: ReadingTone[], gender: VoiceGender, pitch: number, breaths: boolean, metadata?: SceneMetadata): Promise<string> {
-    try {
+    return withFallback(async (ai) => {
       const toneList = tones.length > 0 ? tones.map(t => t.toLowerCase()) : ['neutral'];
       const toneDescription = toneList.join(' + ');
         
@@ -54,26 +90,21 @@ export const geminiService = {
       TONE SYNTHESIS ALGORITHM (Emotional Core Blending):
       Target Narrative Profile: ${toneDescription}. 
 
-      INSTRUCTIONS FOR SOPHISTICATED VOICE SYNTHESIS:
-      1. **Identify Emotional Resonance**: Instead of alternating styles, find the "intersection" of the selected tones. 
-         - If 'Spooky' and 'Dramatic' are paired: Create a performance of 'Gothic Dread'—combining the low-register, breathy whispers of horror with the wide dynamic amplitude and theatrical gravity of a tragedy.
-         - If 'Stern' and 'Calm' are paired: Evoke 'Commanding Authority'—a steady, unshakeable pace with sharp, clipped consonants.
-      2. **Prioritize Subtext**: Use the dominant emotional core of the tones to color your delivery. Let the psychological weight of the tones dictate your vocal timbre, resonance, and micro-inflections.
-      3. **Fluid Transitions**: Ensure transitions between sentences are governed by the narrative flow. As the prose shifts, subtly re-weight the blend of the selected tones to match the changing energy.
-      4. **Handle Contradictions**: If tones seem polar (e.g., 'Energetic' + 'Stern'), synthesize them into a 'Drill Sergeant' style—sharp, high-energy delivery tempered by rigid, cold discipline.
+      INSTRUCTIONS:
+      1. Identify Emotional Resonance: Create a performance that intersects the chosen tones.
+      2. Prioritize Subtext: Use the tones to color vocal micro-inflections.
+      3. Fluid Transitions: Ensure pacing is governed by narrative flow.
 
-      ${metadata ? `SCENE CONTEXT (Weight the synthesis based on this analysis):
-      - Overall Atmospheric Mood: ${metadata.mood}
-      - Narrative Pacing Requirement: ${metadata.pacing}
-      - Dynamic Interaction (Characters present): ${metadata.keyCharacters.join(', ')}
-      - Emphasis Anchors (Key Phrases): ${metadata.keyPhrases.join(', ')}` : ''}
+      ${metadata ? `SCENE CONTEXT:
+      - Mood: ${metadata.mood}
+      - Pacing: ${metadata.pacing}
+      - Characters: ${metadata.keyCharacters.join(', ')}` : ''}
 
-      VOICE MODULATION SPECS:
-      - **Pitch Calibration**: Apply a relative pitch shift of ${pitch}%.
-      - **Natural Respiration**: ${breaths ? 'Incorporate audible, context-aware breaths. Short, sharp intakes for tension; long, slow exhalations for relief or mystery.' : 'Maintain a pristine, breath-minimized studio delivery.'}
-      - **Dynamic Pacing**: If pacing is "fast", prioritize rhythmic drive and staccato delivery. If "slow", favor legato vowels and deep, intentional silences.
+      VOICE MODULATION:
+      - Pitch Shift: ${pitch}%
+      - Natural Respiration: ${breaths ? 'Include audible breaths.' : 'Clean studio delivery.'}
 
-      TEXT TO NARRATE: "${text}"`;
+      TEXT: "${text}"`;
       
       const voiceName = gender === VoiceGender.FEMALE ? 'Kore' : 'Fenrir';
 
@@ -92,25 +123,19 @@ export const geminiService = {
       });
 
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (!base64Audio) throw new Error("No audio data received from Gemini.");
+      if (!base64Audio) throw new Error("No audio data received.");
       return base64Audio;
-    } catch (e) {
-      console.error("Text-to-speech engine failed:", e);
-      throw e;
-    }
+    });
   },
 
   /**
-   * Extract key characters and generate biographies using Gemini 3 Flash.
+   * Extract key characters and generate biographies.
    */
   async extractCharacters(contextText: string): Promise<CharacterBio[]> {
-    try {
+    return withFallback(async (ai) => {
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: `Analyze the provided novel text and identify the most significant characters. 
-        For each character, generate a concise dossier.
-        
-        Text sample: ${contextText.substring(0, 15000)}...`,
+        contents: `Identify the significant characters and generate bios. Sample: ${contextText.substring(0, 15000)}...`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -119,10 +144,10 @@ export const geminiService = {
               type: Type.OBJECT,
               properties: {
                 name: { type: Type.STRING },
-                role: { type: Type.STRING, description: "e.g., Protagonist, Supporting, Antagonist" },
-                description: { type: Type.STRING, description: "2-3 sentence biography focusing on their core motivation and personality." },
+                role: { type: Type.STRING },
+                description: { type: Type.STRING },
                 traits: { type: Type.ARRAY, items: { type: Type.STRING } },
-                mentions: { type: Type.NUMBER, description: "Relative importance score from 1-100" }
+                mentions: { type: Type.NUMBER }
               },
               required: ["name", "role", "description", "traits", "mentions"]
             }
@@ -132,54 +157,36 @@ export const geminiService = {
 
       if (!response.text) return [];
       return JSON.parse(response.text.trim());
-    } catch (e) {
-      console.error("Character extraction failed:", e);
-      return [];
-    }
+    });
   },
 
   /**
-   * Literary Analysis Chatbot using Gemini 3 Pro with full context awareness.
+   * Literary Analysis Chatbot.
    */
   async chat(message: string, contextText: string, characters: CharacterBio[], history: { role: 'user' | 'model', parts: { text: string }[] }[]): Promise<string> {
-    try {
+    return withFallback(async (ai) => {
       const characterContext = characters.length > 0 
-        ? "CHARACTER DOSSIER:\n" + characters.map(c => `- ${c.name} (${c.role}): ${c.description} (Traits: ${c.traits.join(", ")})`).join("\n")
-        : "No character dossier available yet.";
+        ? "CHARACTER DOSSIER:\n" + characters.map(c => `- ${c.name} (${c.role}): ${c.description}`).join("\n")
+        : "";
       
       const chatInstance = ai.chats.create({
         model: 'gemini-3-pro-preview',
         config: {
-          systemInstruction: `You are an expert literary scholar and analysis chatbot. Your purpose is to help the user understand and analyze the novel they have provided.
-          
-          ${characterContext}
-
-          FULL NOVEL CONTEXT (Representative Sample): 
-          ${contextText.substring(0, 10000)}...
-
-          CORE TASKS:
-          - Analyze specific character arcs and relationships.
-          - Identify recurring themes and motifs.
-          - Discuss the emotional tone and narrative structure.
-          - If the user asks about a character, refer to the dossier for consistency.
-          - Be insightful, intellectual, yet accessible.`,
+          systemInstruction: `You are an expert literary analysis chatbot. ${characterContext}\n\nNOVEL CONTEXT: ${contextText.substring(0, 8000)}...`,
         },
         history: history
       });
 
       const response = await chatInstance.sendMessage({ message });
-      return response.text || "I'm sorry, I couldn't generate a response based on the text.";
-    } catch (e) {
-      console.error("Chat scholarship engine failed:", e);
-      return "An error occurred while analyzing the manuscript.";
-    }
+      return response.text || "I'm sorry, I couldn't generate a response.";
+    });
   },
 
   /**
-   * Voice Command Transcription using Gemini 3 Flash.
+   * Voice Command Transcription.
    */
   async transcribeAudio(base64Audio: string): Promise<string> {
-    try {
+    return withFallback(async (ai) => {
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: {
@@ -190,15 +197,11 @@ export const geminiService = {
                 data: base64Audio,
               },
             },
-            { text: "Transcribe the audio accurately. This is a voice command for a literary app. Only return the transcribed text without commentary." }
+            { text: "Transcribe the audio command accurately. Only return the transcribed text." }
           ]
         }
       });
-
       return response.text ? response.text.trim() : "";
-    } catch (e) {
-      console.error("Voice command transcription failed:", e);
-      return "";
-    }
+    });
   }
 };
